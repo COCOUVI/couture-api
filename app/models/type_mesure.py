@@ -1,4 +1,5 @@
 from sqlalchemy import Boolean, Column, Integer, String
+from sqlalchemy.dialects.postgresql import UUID
 from app.core.database import Base
 
 
@@ -7,7 +8,7 @@ class TypeMesure(Base):
     __table_args__ = {"extend_existing": True}
 
     id          = Column(Integer, primary_key=True, autoincrement=True)
-    external_id = Column(String, unique=True, nullable=True)
+    external_id = Column(UUID(as_uuid=True), unique=True, nullable=True)
     code        = Column(String, unique=True, nullable=False)
     nom         = Column(String, nullable=False)
     unite       = Column(String, default="cm")

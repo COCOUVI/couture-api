@@ -23,7 +23,7 @@ router = APIRouter(prefix="/measure", tags=["Mesures"])
 async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_db)):
     try:
         fiche = db.query(FicheMesure).filter(
-            FicheMesure.external_id == payload.fiche_id
+            FicheMesure.external_id == uuid.UUID(payload.fiche_id)
         ).first()
         if not fiche:
             raise HTTPException(
@@ -69,7 +69,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
             )
             if not type_mesure:
                 type_mesure = TypeMesure(
-                    external_id=str(uuid.uuid4()),
+                    external_id=uuid.uuid4(),
                     code=m["type_mesure_code"],
                     nom=m["label"],
                     unite=m["unite"],
@@ -80,7 +80,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
                 db.flush()
 
             mesure = Mesure(
-                external_id=str(uuid.uuid4()),
+                external_id=uuid.uuid4(),
                 fiche_mesure_id=fiche.id,
                 type_mesure_id=type_mesure.id,
                 valeur=m["valeur"],
@@ -122,7 +122,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
 def get_mesures(fiche_id: str, db: Session = Depends(get_db)):
     try:
         fiche = db.query(FicheMesure).filter(
-            FicheMesure.external_id == fiche_id
+            FicheMesure.external_id == uuid.UUID(fiche_id)
         ).first()
         if not fiche:
             raise HTTPException(
