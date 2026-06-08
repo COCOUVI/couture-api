@@ -1,14 +1,17 @@
 from fastapi import APIRouter
 from app.core.config import settings
+from app.core.database import check_db_connection
 
-router = APIRouter(tags=["Santé"])
+router = APIRouter(tags=["Sante"])
 
 
 @router.get("/health")
 def health_check():
-    """Vérifie que l'API est opérationnelle."""
+    """Verifie que l'API et la DB sont operationnelles."""
+    db_ok = check_db_connection()
     return {
-        "statut"      : "ok",
+        "statut": "ok" if db_ok else "degrage",
         "environnement": settings.ENVIRONMENT,
-        "version"     : "1.0.0",
+        "version": "1.0.0",
+        "db_connectee": db_ok,
     }
