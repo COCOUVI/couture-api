@@ -14,5 +14,9 @@ class Settings(BaseSettings):
     MODEL_PATH: str = "pose_landmarker_heavy.task"
     MIN_CONFIDENCE: float = 0.5
 
+    CLOUDINARY_CLOUD_NAME: str = "dvne7dd7h"
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+
 
 settings = Settings()

@@ -13,6 +13,7 @@ from app.schemas.mesure import MesureRequest, MesureResponse, MesureOut
 from app.services.download_service import download_image_as_rgb
 from app.services.measurement_service import extraire_face, extraire_dos, extraire_profil, fusionner
 from app.services.pose_service import detect_world_landmarks
+from app.services.cloudinary_cleanup import cleanup_cloudinary_images
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,15 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
             db.add(mesure)
 
         db.commit()
+
+        try:
+            await cleanup_cloudinary_images([
+                payload.face_url,
+                payload.dos_url,
+                payload.profil_url,
+            ])
+        except Exception:
+            pass
 
         return MesureResponse(
             fiche_id=payload.fiche_id,
