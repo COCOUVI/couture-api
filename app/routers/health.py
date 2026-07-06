@@ -1,3 +1,4 @@
+# ── Route de santé — GET /health ─────────────────────────────────────
 from fastapi import APIRouter
 from app.core.config import settings
 from app.core.database import check_db_connection

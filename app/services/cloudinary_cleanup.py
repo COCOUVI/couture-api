@@ -1,3 +1,4 @@
+# ── Service de nettoyage Cloudinary — suppression des images ─────────
 import logging
 import re
 from urllib.parse import urlparse
@@ -8,22 +9,26 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Regex pour extraire le public_id d'une URL Cloudinary
 _CLOUDINARY_PATTERN = re.compile(
     r"/image/upload/(?:v\d+/)?(.+)"
 )
 
 
 def _extract_public_id(url: str) -> str | None:
+    """Extrait le public_id d'une URL Cloudinary (ex: koda_uploads/.../face.jpg -> koda_uploads/.../face)."""
     path = urlparse(url).path
     match = _CLOUDINARY_PATTERN.search(path)
     if not match:
         return None
     full = match.group(1)
-    public_id = re.sub(r"\.\w+$", "", full)
+    public_id = re.sub(r"\.\w+$", "", full)  # Supprime l'extension
     return public_id
 
 
 async def delete_cloudinary_image(url: str) -> bool:
+    """Supprime une image sur Cloudinary via l'API Admin destroy."""
+    # Vérification de la configuration
     if not settings.CLOUDINARY_API_KEY or not settings.CLOUDINARY_API_SECRET:
         logger.warning("CLOUDINARY_API_KEY/CLOUDINARY_API_SECRET non configurés")
         return False
@@ -62,5 +67,6 @@ async def delete_cloudinary_image(url: str) -> bool:
 
 
 async def cleanup_cloudinary_images(urls: list[str]) -> None:
+    """Supprime une liste d'images Cloudinary après traitement réussi."""
     for url in urls:
         await delete_cloudinary_image(url)

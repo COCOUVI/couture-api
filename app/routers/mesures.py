@@ -1,3 +1,4 @@
+# ── Routes de mesures — POST /measure, GET /measure/{id} ─────────────
 import logging
 import uuid
 
@@ -20,9 +21,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/measure", tags=["Mesures"])
 
 
+# ── POST /measure — analyse et stocke les mesures ────────────────────
 @router.post("", response_model=MesureResponse, status_code=status.HTTP_201_CREATED)
 async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_db)):
+    """
+    Reçoit 3 URLs Cloudinary (face, dos, profil),
+    télécharge les images, exécute MediaPipe,
+    calcule les mesures et les stocke en DB.
+    """
     try:
+        # 1. Vérification de l'existence de la fiche en DB
         fiche = db.query(FicheMesure).filter(
             FicheMesure.external_id == uuid.UUID(payload.fiche_id)
         ).first()
@@ -34,6 +42,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
 
         m_face = m_dos = m_profil = {}
 
+        # 2. Traitement de la vue de face (obligatoire)
         try:
             img_face = await download_image_as_rgb(payload.face_url)
             wlms_face = detect_world_landmarks(img_face)
@@ -44,6 +53,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
                 detail=f"Vue face — {str(e)}",
             )
 
+        # 3. Traitement de la vue de dos (optionnelle)
         try:
             img_dos = await download_image_as_rgb(payload.dos_url)
             wlms_dos = detect_world_landmarks(img_dos)
@@ -51,6 +61,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
         except Exception:
             pass
 
+        # 4. Traitement de la vue de profil (optionnelle)
         try:
             img_profil = await download_image_as_rgb(payload.profil_url)
             wlms_profil = detect_world_landmarks(img_profil)
@@ -58,10 +69,13 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
         except Exception:
             pass
 
+        # 5. Fusion des 3 vues et calcul des circonférences
         mesures_calculees = fusionner(m_face, m_dos, m_profil)
 
+        # 6. Suppression des anciennes mesures pour cette fiche
         db.query(Mesure).filter(Mesure.fiche_mesure_id == fiche.id).delete()
 
+        # 7. Insertion des nouvelles mesures
         for m in mesures_calculees:
             type_mesure = (
                 db.query(TypeMesure)
@@ -92,6 +106,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
 
         db.commit()
 
+        # 8. Nettoyage : suppression des images Cloudinary
         try:
             await cleanup_cloudinary_images([
                 payload.face_url,
@@ -128,8 +143,12 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
         )
 
 
+# ── GET /measure/{fiche_id} — récupération des mesures stockées ──────
 @router.get("/{fiche_id}", response_model=MesureResponse)
 def get_mesures(fiche_id: str, db: Session = Depends(get_db)):
+    """
+    Retourne toutes les mesures déjà stockées pour une fiche donnée.
+    """
     try:
         fiche = db.query(FicheMesure).filter(
             FicheMesure.external_id == uuid.UUID(fiche_id)

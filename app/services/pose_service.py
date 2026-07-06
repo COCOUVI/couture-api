@@ -1,3 +1,4 @@
+# ── Service de détection de pose via MediaPipe ───────────────────────
 import math
 import os
 import urllib.request
@@ -16,30 +17,35 @@ MODEL_URL = (
 
 
 def ensure_model():
+    """Télécharge le modèle MediaPipe s'il n'existe pas encore."""
     if not os.path.exists(settings.MODEL_PATH):
-        print(f"⬇️  Téléchargement du modèle MediaPipe → {settings.MODEL_PATH}")
+        print(f"  Téléchargement du modèle MediaPipe → {settings.MODEL_PATH}")
         urllib.request.urlretrieve(MODEL_URL, settings.MODEL_PATH)
-        print("✅ Modèle prêt.")
+        print(" Modèle prêt.")
 
 
-# ── Indices landmarks MediaPipe ──────────────────────────────────────
+# Indices des landmarks MediaPipe Pose
+# la convention est definie par le modèle MediaPipe Pose Landmarker par defaut 
+
+
 NOSE = 0
-LEFT_EAR = 7;    RIGHT_EAR = 8
-L_SHOULDER = 11; R_SHOULDER = 12
-L_ELBOW = 13;    R_ELBOW = 14
-L_WRIST = 15;    R_WRIST = 16
-L_HIP = 23;      R_HIP = 24
-L_KNEE = 25;     R_KNEE = 26
-L_ANKLE = 27;    R_ANKLE = 28
+LEFT_EAR = 7;    RIGHT_EAR = 8       # Oreilles
+L_SHOULDER = 11; R_SHOULDER = 12     # Épaules
+L_ELBOW = 13;    R_ELBOW = 14        # Coudes
+L_WRIST = 15;    R_WRIST = 16        # Poignets
+L_HIP = 23;      R_HIP = 24          # Hanches
+L_KNEE = 25;     R_KNEE = 26         # Genoux
+L_ANKLE = 27;    R_ANKLE = 28        # Chevilles
 
 
-# ── Initialisation Tasks API ─────────────────────────────────────────
+# ── Alias vers l'API Tasks de MediaPipe ──────────────────────────────
 BaseOptions           = mp.tasks.BaseOptions
 PoseLandmarker        = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 VisionRunningMode     = mp.tasks.vision.RunningMode
 
 
+#  Détection principale 
 def detect_world_landmarks(img_rgb: np.ndarray) -> list:
     """
     Détecte la pose sur une image RGB numpy array.
@@ -67,7 +73,7 @@ def detect_world_landmarks(img_rgb: np.ndarray) -> list:
     return result.pose_world_landmarks[0]
 
 
-# ── Calcul de distance 3D ────────────────────────────────────────────
+# ── Outils mathématiques ─────────────────────────────────────────────
 def w3d(wlms: list, a: int, b: int) -> float:
     """Distance 3D en cm entre deux world_landmarks."""
     la, lb = wlms[a], wlms[b]
@@ -78,6 +84,7 @@ def w3d(wlms: list, a: int, b: int) -> float:
 
 
 def avg(*values: float) -> float:
+    """Moyenne arrondie à 1 décimale."""
     return round(sum(values) / len(values), 1)
 
 
