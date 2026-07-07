@@ -1,5 +1,6 @@
 # ── Logging ──────────────────────────────────────────────────────────
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,17 @@ from app.routers import mesures, health
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    ok = check_db_connection()
+    if ok:
+        logger.info("API prete")
+    else:
+        logger.warning("API demarree sans connexion DB")
+    yield
+
 
 # ── Instance FastAPI ─────────────────────────────────────────────────
 app = FastAPI(
@@ -21,6 +33,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # ── CORS — autorise toutes les origines (dev) ────────────────────────
@@ -41,14 +54,3 @@ app.include_router(mesures.router)
 @app.get("/", include_in_schema=False)
 def root():
     return {"message": "Couture API — voir /docs pour la documentation"}
-
-
-# ── Événement au démarrage — vérifie la connexion DB ─────────────────
-@app.on_event("startup")
-def on_startup():
-    """Verifie la connexion DB au demarrage."""
-    ok = check_db_connection()
-    if ok:
-        logger.info("API prete")
-    else:
-        logger.warning("API demarree sans connexion DB")
