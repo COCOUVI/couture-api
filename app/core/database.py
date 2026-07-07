@@ -13,9 +13,14 @@ connect_args = {}
 if "supabase" in settings.DATABASE_URL.lower() or "sslmode" not in settings.DATABASE_URL:
     connect_args["sslmode"] = "require"
 
+# ── Utiliser psycopg v3 (remplace psycopg2-binary, non compatible Python 3.14+) ──
+database_url = settings.DATABASE_URL
+if database_url.startswith("postgresql://") and "+psycopg" not in database_url:
+    database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+
 # ── Moteur SQLAlchemy avec pool de connexions ────────────────────────
 engine = create_engine(
-    settings.DATABASE_URL,
+    database_url,
     pool_pre_ping=True,      # Vérifie la connexion avant utilisation
     pool_size=5,              # 5 connexions dans le pool
     max_overflow=10,          # 10 connexions supplémentaires si nécessaire
