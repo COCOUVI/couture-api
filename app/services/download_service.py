@@ -1,4 +1,4 @@
-# ── Service de téléchargement et prétraitement des images ────────────
+#  Service de téléchargement et prétraitement des images
 import io
 
 import httpx

@@ -1,4 +1,4 @@
-# ── Service de nettoyage Cloudinary — suppression des images ─────────
+#  Service de nettoyage Cloudinary && suppression des images 
 import logging
 import re
 from urllib.parse import urlparse
