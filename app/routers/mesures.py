@@ -45,9 +45,11 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
         # 2. Traitement de la vue de face (obligatoire)
         try:
             img_face = await download_image_as_rgb(payload.face_url)
+            logger.info("Image face téléchargée (%s)", payload.face_url)
             wlms_face = detect_world_landmarks(img_face)
             m_face = extraire_face(wlms_face)
         except Exception as e:
+            logger.error("Vue face — %s: %s", type(e).__name__, e)
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Vue face — {str(e)}",
