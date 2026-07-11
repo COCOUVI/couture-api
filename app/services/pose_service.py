@@ -38,7 +38,7 @@ L_KNEE = 25;     R_KNEE = 26         # Genoux
 L_ANKLE = 27;    R_ANKLE = 28        # Chevilles
 
 
-# ── Alias vers l'API Tasks de MediaPipe ──────────────────────────────
+# Alias vers l'API Tasks de MediaPipe
 BaseOptions           = mp.tasks.BaseOptions
 PoseLandmarker        = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
