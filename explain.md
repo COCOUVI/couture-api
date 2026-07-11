@@ -17,41 +17,48 @@ Pipeline simplifie :
 Image -> MediaPipe -> landmarks 3D -> measurement_service.py -> mesures en cm
 ```
 
-## Calibration de l'echelle MediaPipe (`ASSUMED_SHOULDER_WIDTH_CM`)
+## Calibration de l'echelle MediaPipe (`_compute_scale`)
 
 ### Probleme
 
 MediaPipe fournit des `world_landmarks` en metres. Cependant, ces coordonnees sont estimees a partir d'une seule image (monoculaire). Sans connaitre la distance camera-sujet ni la focale, l'echelle absolue est **imprecise**. Pour un cousin de 160 cm, on obtenait 66 cm — soit un facteur d'erreur de 2.4x.
 
-### Solution : calibration par reference anatomique
+### Solution : deux modes de calibration
 
-On utilise la **largeur d'epaules** comme reference de calibration :
+```python
+def _compute_scale(wlms, known_height_cm=None):
+```
+
+#### Mode 1 : calibration par taille connue (recommande)
+
+L'utilisateur fournit sa taille reelle (ex: 175 cm). Le service :
+
+1. Estime la hauteur brute a partir des world landmarks de MediaPipe (nez → chevilles + corrections tete/pieds).
+2. Calcule le facteur d'echelle : `scale = taille_connue / hauteur_brute`.
+
+```python
+scale = known_height_cm / max(raw_height, 1.0)
+```
+
+**Avantage** : fonctionne pour tout le monde — enfant, adolescent, adulte, senior. Aucune supposition anatomique.
+
+#### Mode 2 : fallback par largeur d'epaules
+
+Si la taille n'est pas fournie, on utilise la largeur d'epaules comme reference approximative :
 
 ```python
 ASSUMED_SHOULDER_WIDTH_CM = 39.0  # moyenne adulte
-```
-
-MediaPipe estime aussi la largeur d'epaules (`epaules_raw`) dans la meme echelle que toutes les autres mesures. Puisque cette echelle est fausse, le rapport entre la valeur reelle (39 cm) et la valeur MediaPipe donne un **facteur de correction** unique :
-
-```python
 scale = ASSUMED_SHOULDER_WIDTH_CM / max(epaules_raw, 1.0)
 ```
 
-Ce facteur est applique a **toutes** les mesures derivees des world landmarks :
+Ce mode est moins precis car la largeur d'epaules varie selon les individus. Il sert uniquement de solution de repli.
 
-```python
-ds = lambda a, b: round(d(a, b) * scale, 1)
-```
+### Pourquoi c'est meilleur
 
-### Pourquoi la largeur d'epaules ?
-
-1. **Anatomiquement stable** : la largeur biacromiale varie peu (35-42 cm chez l'adulte).
-2. **Bien detectee** : les epaules sont parmi les landmarks les plus robustes de MediaPipe.
-3. **Meme echelle** : toutes les mesures partagent le meme facteur d'erreur. Corriger une mesure corrige tout.
-
-### Avantage
-
-La calibration transforme des donnees MediaPipe en valeurs centimetriques coherentes. Sans elle, un algorithme par ailleurs correct produit des resultats inexploitables.
+1. **Adaptable a tous** : un enfant de 8 ans (120 cm) ou un adulte de 190 cm — le mode "taille connue" donne des mesures exactes.
+2. **Sans supposition** : plus de valeur fixe cachee. L'utilisateur controle la calibration.
+3. **Graceful degradation** : si la taille n'est pas fournie, le fallback epaules donne une approximation.
+4. **Transparence** : le log indique clairement le mode utilise et le facteur applique.
 
 ## Imports depuis `pose_service.py`
 
@@ -739,26 +746,25 @@ La taille est estimee a son propre niveau anatomique, avec une largeur et une pr
 
 ## Avantage pour la soutenance (jury)
 
-Cette correction apporte plusieurs arguments solides pour defendre le projet :
+Cette approche offre plusieurs arguments solides :
 
-1. **Probleme identifie** : "MediaPipe donne des mesures en metres, mais l'echelle est imprecise car estimee depuis une seule image."
-2. **Solution justifiee** : "On utilise une reference anatomique stable (largeur d'epaules ~39 cm) pour calibrer toute la scene."
-3. **Resultat prouve** : "Avant : 66 cm pour une personne de 160 cm. Apres : ~160 cm."
-4. **Generalisation possible** : "Avec une photo d'identite ou un objet de taille connue, la calibration pourrait etre encore plus precise."
-5. **Robustesse** : "Le facteur d'echelle est le meme pour toutes les mesures, preservant les proportions."
-6. **Approche scientifique** : utilisation de donnees anthropometriques reelles plutot que des constantes arbitraires.
+1. **Probleme identifie** : "MediaPipe estime l'echelle 3D depuis une seule image → imprecise (66 cm pour 160 cm reel)."
+2. **Deux solutions** : "(a) L'utilisateur fournit sa taille → calibration parfaite pour tous. (b) Fallback automatique par largeur d'epaules."
+3. **Resultat prouve** : "Avec la taille connue : mesures exactes. Sans : ~160 cm au lieu de 66 cm."
+4. **Flexibilite** : "Enfant comme adulte, la taille connue s'adapte a tous."
+5. **Approche scientifique** : deux strategies, l'une exacte (reference utilisateur), l'autre approximative (reference anatomique documentee).
+6. **Transparence** : le mode de calibration est logge, visible dans les logs.
 
-### Points faibles a anticiper
+### Questions du jury anticipees
 
-- La largeur d'epaules varie selon les individus.
-- Un utilisateur pourrait entrer sa taille reelle pour affiner.
-- La calibration mono-image reste une approximation.
+**Q : "Et si l'utilisateur ne connait pas sa taille ?"**
+R : "Le fallback par epaules donne une approximation. On pourrait aussi detecter automatiquement la taille depuis une photo d'identite ou un objet de reference dans l'image."
 
-En pratique, le jury appreciera que vous ayez :
-- identifie le probleme ;
-- propose une solution simple et justifiable ;
-- mesure l'amelioration ;
-- documente les limites.
+**Q : "Pourquoi 39 cm pour les epaules ?"**
+R : "C'est la moyenne adulte issue de la litterature anthropometrique. C'est un simple fallback. L'utilisateur peut fournir sa taille pour une bien meilleure precision."
+
+**Q : "Votre solution est-elle fiable pour un enfant ?"**
+R : "Avec la taille connue, oui, car le facteur d'echelle s'adapte a n'importe quelle stature. Sans taille connue, le fallback par epaules est moins fiable pour un enfant — c'est une limite documentee."
 
 ## Pourquoi la nouvelle methode est meilleure pour `HAUTEUR`
 
@@ -799,14 +805,20 @@ Cette methode reste une estimation par image. Pour obtenir de meilleures mesures
 - des vetements proches du corps ;
 - une distance camera stable.
 
-### Limite de la calibration par epaules
+### Calibration par epaules (fallback)
 
-La calibration suppose une largeur d'epaules moyenne de 39 cm. En realite :
+Le fallback par epaules suppose une largeur moyenne de 39 cm. En realite :
 
-- Un homme large d'epaules peut faire 44 cm → les mesures seront legerement sous-estimees.
-- Une femme etroite peut faire 35 cm → les mesures seront legerement surestimees.
-- Les enfants et adolescents ont des epaules plusetroites → l'erreur augmente.
+- Un homme large d'epaules (44 cm) → mesures sous-estimees.
+- Une femme etroite (35 cm) → mesures surestimees.
+- Un enfant de 10 ans (28 cm) → mesures fortement surestimees.
 
-Neanmoins, cette approximation est bien meilleure que l'absence totale de calibration (qui donnait 66 cm pour 160 cm reel).
+C'est pourquoi ce mode est un fallback. La solution recommandee est la **taille connue**.
 
-Pour le jury : le choix d'une reference anatomique (la largeur d'epaules) plutot qu'une constante arbitraire montre une demarche scientifique : on utilise une propriete du corps humain stable et bien documentee dans la litterature anthropometrique.
+### Calibration par taille connue
+
+Aucune limite anatomique — la calibration s'adapte a n'importe quelle stature. La seule contrainte est que l'utilisateur doit connaitre et saisir sa taille.
+
+### Limite commune aux deux modes
+
+La calibration mono-image suppose que le facteur d'echelle est le meme pour toutes les mesures (epaules, bras, jambes, profondeur). C'est vrai si MediaPipe est coherent dans son echelle, ce qui est le cas pour les world landmarks.

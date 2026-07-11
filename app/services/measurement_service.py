@@ -1,5 +1,6 @@
 # Service de calcul des mesures corporelles
 import logging
+from typing import Optional
 
 from app.services.pose_service import (
     NOSE, LEFT_EAR, RIGHT_EAR,
@@ -11,9 +12,8 @@ from app.services.pose_service import (
 
 logger = logging.getLogger(__name__)
 
-# Largeur d'epaules de reference pour calibrer l'echelle MediaPipe.
-# MediaPipe world landmarks ont une echelle absolue imprecise (monoculaire).
-# On suppose une largeur d'epaules moyenne de 39 cm et on calibre tout.
+# Fallback : largeur d'epaules de reference (moyenne adulte)
+# Utilisee uniquement quand known_height_cm n'est pas fourni.
 ASSUMED_SHOULDER_WIDTH_CM = 39.0
 
 
@@ -80,29 +80,36 @@ def _clamp(value: float, low: float, high: float) -> float:
     return round(min(max(value, low), high), 1)
 
 
-def _estimate_body_height(wlms: list, shoulder_width_cm: float) -> float:
-    shoulder_y = (wlms[L_SHOULDER].y + wlms[R_SHOULDER].y) / 2
-    ankle_y = (wlms[L_ANKLE].y + wlms[R_ANKLE].y) / 2
+def _compute_scale(wlms: list, known_height_cm: Optional[float] = None) -> float:
+    epaules_raw = w3d(wlms, L_SHOULDER, R_SHOULDER)
 
-    nose_to_ankle = abs(wlms[NOSE].y - ankle_y) * 100
-    shoulder_to_ankle = abs(shoulder_y - ankle_y) * 100
-    ear_width = w3d(wlms, LEFT_EAR, RIGHT_EAR)
+    if known_height_cm:
+        shoulder_y = (wlms[L_SHOULDER].y + wlms[R_SHOULDER].y) / 2
+        ankle_y = (wlms[L_ANKLE].y + wlms[R_ANKLE].y) / 2
 
-    head_top_extra = max(ear_width * 0.45, shoulder_width_cm * 0.14)
-    foot_extra = max(shoulder_width_cm * 0.07, 3.0)
+        nose_to_ankle = abs(wlms[NOSE].y - ankle_y) * 100
+        shoulder_to_ankle = abs(shoulder_y - ankle_y) * 100
+        ear_width = w3d(wlms, LEFT_EAR, RIGHT_EAR)
 
-    height_from_nose = nose_to_ankle + head_top_extra + foot_extra
-    height_from_shoulders = shoulder_to_ankle / 0.82
+        head_top_extra = max(ear_width * 0.45, epaules_raw * 0.14)
+        foot_extra = max(epaules_raw * 0.07, 3.0)
 
-    estimated = (height_from_nose * 0.65) + (height_from_shoulders * 0.35)
-    return round(estimated, 1)
+        height_from_nose = nose_to_ankle + head_top_extra + foot_extra
+        height_from_shoulders = shoulder_to_ankle / 0.82
 
+        raw_height = (height_from_nose * 0.65) + (height_from_shoulders * 0.35)
+        scale = known_height_cm / max(raw_height, 1.0)
+        logger.info("Calibration via taille connue: %.1f cm → facteur %.2f", known_height_cm, scale)
+        return scale
 
-def extraire_face(wlms: list) -> dict:
-    d = lambda a, b: w3d(wlms, a, b)
-
-    epaules_raw = d(L_SHOULDER, R_SHOULDER)
     scale = ASSUMED_SHOULDER_WIDTH_CM / max(epaules_raw, 1.0)
+    logger.info("Calibration via epaules: brute %.1f cm, facteur %.2f", epaules_raw, scale)
+    return scale
+
+
+def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
+    d = lambda a, b: w3d(wlms, a, b)
+    scale = _compute_scale(wlms, known_height_cm)
     ds = lambda a, b: round(d(a, b) * scale, 1)
 
     hanches = ds(L_HIP, R_HIP)
@@ -115,14 +122,23 @@ def extraire_face(wlms: list) -> dict:
     jambe = avg(ds(L_HIP, L_ANKLE), ds(R_HIP, R_ANKLE))
     cuisse = avg(ds(L_HIP, L_KNEE), ds(R_HIP, R_KNEE))
     mollet = avg(ds(L_KNEE, L_ANKLE), ds(R_KNEE, R_ANKLE))
-    epaules = round(ASSUMED_SHOULDER_WIDTH_CM, 1)
 
-    hauteur = _estimate_body_height(wlms, ASSUMED_SHOULDER_WIDTH_CM)
-
-    logger.info("Calibration MediaPipe — largeur epaules brute: %.1f cm, facteur echelle: %.2f", epaules_raw, scale)
+    # Hauteur : calculee a partir des memes donnees brutes, puis scalée via _compute_scale
+    shoulder_y = (wlms[L_SHOULDER].y + wlms[R_SHOULDER].y) / 2
+    ankle_y = (wlms[L_ANKLE].y + wlms[R_ANKLE].y) / 2
+    nose_to_ankle = abs(wlms[NOSE].y - ankle_y) * 100 * scale
+    shoulder_to_ankle = abs(shoulder_y - ankle_y) * 100 * scale
+    ear_width = w3d(wlms, LEFT_EAR, RIGHT_EAR) * scale
+    epaules_scaled = w3d(wlms, L_SHOULDER, R_SHOULDER) * scale
+    head_top_extra = max(ear_width * 0.45, epaules_scaled * 0.14)
+    foot_extra = max(epaules_scaled * 0.07, 3.0)
+    height_from_nose = nose_to_ankle + head_top_extra + foot_extra
+    height_from_shoulders = shoulder_to_ankle / 0.82
+    hauteur = round((height_from_nose * 0.65) + (height_from_shoulders * 0.35), 1)
 
     return {
         "HAUTEUR"  : (hauteur,   "face_stature", 0.84),
+        "EPAULES"  : (round(epaules_scaled, 1), "face", 0.92),
         "EPAULES"  : (epaules,   "face", 0.92),
         "BUSTE_L"  : (buste_l,   "face", 0.82),
         "TAILLE_L" : (taille_l,  "face", 0.84),
@@ -137,26 +153,24 @@ def extraire_face(wlms: list) -> dict:
     }
 
 
-def extraire_dos(wlms: list) -> dict:
+def extraire_dos(wlms: list, known_height_cm: Optional[float] = None) -> dict:
     d = lambda a, b: w3d(wlms, a, b)
-    epaules_raw = d(L_SHOULDER, R_SHOULDER)
-    scale = ASSUMED_SHOULDER_WIDTH_CM / max(epaules_raw, 1.0)
+    scale = _compute_scale(wlms, known_height_cm)
     ds = lambda a, b: round(d(a, b) * scale, 1)
     return {
-        "EPAULES_DOS"  : (round(ASSUMED_SHOULDER_WIDTH_CM, 1),             "dos", 0.90),
+        "EPAULES_DOS"  : (round(w3d(wlms, L_SHOULDER, R_SHOULDER) * scale, 1), "dos", 0.90),
         "HANCHES_DOS_L": (ds(L_HIP, R_HIP),                                "dos", 0.88),
         "TORSE_DOS"    : (avg(ds(L_SHOULDER, L_HIP), ds(R_SHOULDER, R_HIP)), "dos", 0.86),
     }
 
 
-def extraire_profil(wlms: list) -> dict:
+def extraire_profil(wlms: list, known_height_cm: Optional[float] = None) -> dict:
     prof_epaule = round(abs(wlms[L_SHOULDER].z - wlms[R_SHOULDER].z) * 100, 1)
     prof_taille = _interpolated_torso_depth(wlms, 0.62)
     prof_hanche = round(abs(wlms[L_HIP].z - wlms[R_HIP].z) * 100, 1)
     torse_profil = round(abs(wlms[L_SHOULDER].y - wlms[L_HIP].y) * 100, 1)
 
-    epaules_raw = w3d(wlms, L_SHOULDER, R_SHOULDER)
-    scale = ASSUMED_SHOULDER_WIDTH_CM / max(epaules_raw, 1.0)
+    scale = _compute_scale(wlms, known_height_cm)
 
     return {
         "PROF_BUSTE" : (round(prof_epaule * scale, 1),  "profil", 0.75),
