@@ -19,7 +19,8 @@ async def download_image_as_rgb(url: str) -> np.ndarray:
         response.raise_for_status()
 
     img_pil = Image.open(io.BytesIO(response.content))
-    with ImageOps.ExifTranspose(img_pil) as transposed:
+    transposed = ImageOps.exif_transpose(img_pil)
+    if transposed is not None:
         img_pil = transposed
     img_pil = img_pil.convert("RGB")              # Supprime le canal alpha si présent
     return np.array(img_pil)
