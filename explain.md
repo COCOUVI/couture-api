@@ -317,79 +317,87 @@ Les photos peuvent produire des erreurs :
 
 Le `clamp` evite donc des valeurs aberrantes.
 
-## `_estimate_body_height(wlms, shoulder_width_cm)`
+## `_compute_scale(wlms, known_height_cm=None)` — coeur de la calibration
 
 ```python
-def _estimate_body_height(wlms: list, shoulder_width_cm: float) -> float:
+def _compute_scale(wlms: list, known_height_cm: Optional[float] = None) -> float:
 ```
 
-Cette fonction estime `HAUTEUR`, donc la taille reelle de la personne en centimetres.
+Cette fonction remplace l'ancienne `_estimate_body_height`. Elle ne calcule pas directement `HAUTEUR`. Elle calcule le **facteur d'echelle** qui sera applique a toutes les mesures (hauteur, largeurs, longueurs, profondeurs).
 
-Pourquoi cette fonction existe ?
+### Pourquoi ce changement ?
 
-MediaPipe donne des landmarks comme le nez, les epaules et les chevilles, mais il ne donne pas directement :
+L'ancienne approche appliquait la correction uniquement sur `HAUTEUR` et laissait les autres mesures (epaules, bras, jambes) avec l'echelle MediaPipe brute — ce qui donnait des mesures incoherentes entre elles.
 
-- le sommet exact du crane ;
-- le sol exact sous les pieds ;
-- une mesure "taille reelle" prete a utiliser.
+La nouvelle approche applique **le meme facteur** a toutes les mesures, preservant les proportions.
 
-L'ancien calcul utilisait surtout la distance epaules -> chevilles, puis ajoutait un petit correctif :
+### Mode 1 — calibration par taille connue
 
 ```python
-hauteur = abs(epaules_y - chevilles_y) * 100 + epaules * 0.15
+if known_height_cm:
+    # 1. Estimer la hauteur brute a partir des raw world landmarks
+    nose_to_ankle = abs(wlms[NOSE].y - ankle_y) * 100
+    shoulder_to_ankle = abs(shoulder_y - ankle_y) * 100
+    ear_width = w3d(wlms, LEFT_EAR, RIGHT_EAR)
+    head_top_extra = max(ear_width * 0.45, epaules_raw * 0.14)
+    foot_extra = max(epaules_raw * 0.07, 3.0)
+    height_from_nose = nose_to_ankle + head_top_extra + foot_extra
+    height_from_shoulders = shoulder_to_ankle / 0.82
+    raw_height = (height_from_nose * 0.65) + (height_from_shoulders * 0.35)
+
+    # 2. Facteur = taille reelle / hauteur brute MediaPipe
+    scale = known_height_cm / max(raw_height, 1.0)
 ```
 
-Probleme : cela oubliait une grande partie tete/cou et la partie sous les chevilles. La personne pouvait donc etre sous-estimee.
-
-La nouvelle fonction combine deux estimations :
+### Mode 2 — fallback par largeur d'epaules
 
 ```python
-height_from_nose = nose_to_ankle + head_top_extra + foot_extra
-height_from_shoulders = shoulder_to_ankle / 0.82
+else:
+    scale = ASSUMED_SHOULDER_WIDTH_CM / max(epaules_raw, 1.0)
 ```
 
-Explication :
+### Pourquoi la hauteur est calculee dans `extraire_face` et non plus dans une fonction separee ?
 
-- `nose_to_ankle` mesure du nez jusqu'aux chevilles.
-- `head_top_extra` ajoute la distance approximative entre le nez et le sommet du crane.
-- `foot_extra` ajoute la distance approximative entre les chevilles et le sol.
-- `height_from_shoulders` estime la stature a partir du segment epaules -> chevilles.
-
-Ensuite, les deux estimations sont combinees :
+Parce que maintenant la hauteur est juste une mesure scalée comme les autres :
 
 ```python
-estimated = (height_from_nose * 0.65) + (height_from_shoulders * 0.35)
+# Dans extraire_face():
+height_from_nose = (nose_to_ankle * scale) + head_top_extra + foot_extra
+height_from_shoulders = (shoulder_to_ankle * scale) / 0.82
+hauteur = round((height_from_nose * 0.65) + (height_from_shoulders * 0.35), 1)
 ```
 
-On donne plus de poids au nez -> chevilles, car il couvre plus directement le corps presque complet.
+`nose_to_ankle` et `shoulder_to_ankle` sont en cm bruts (raw). On les multiplie par `scale` pour obtenir les cm reels. `head_top_extra` et `foot_extra` utilisent `epaules_scaled * ratio`, donc deja dans la bonne echelle.
 
-Aucun `clamp` n'est plus applique. L'ancien `_clamp(estimated, shoulder_to_ankle * 1.08, shoulder_to_ankle * 1.30)` etait trop restrictif : il limitait la hauteur a 130% du segment epaules-chevilles, ce qui bloquait la correction apportee par la calibration. Exemple : une personne de 160 cm avec un segment epaules-chevilles de 70 cm MediaPipe etait plafonnee a 91 cm, meme apres calibration.
+### Aucun `clamp` restrictif
 
-## `extraire_face(wlms)`
+L'ancien `_clamp(estimated, shoulder_to_ankle * 1.08, shoulder_to_ankle * 1.30)` a ete supprime. Il limitait la hauteur a 130% du segment epaules-chevilles, ce qui bloquait la correction apportee par la calibration. Exemple : une personne de 160 cm avec un segment epaules-chevilles MediaPipe de 70 cm etait plafonnee a 91 cm, meme apres calibration.
+
+## `extraire_face(wlms, known_height_cm=None)`
 
 ```python
-def extraire_face(wlms: list) -> dict:
+def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
 ```
 
 Cette fonction calcule les mesures visibles depuis la photo de face.
 
-La premiere etape est la **calibration d'echelle** :
+La premiere etape est la **calibration d'echelle** via `_compute_scale` :
 
 ```python
-epaules_raw = d(L_SHOULDER, R_SHOULDER)              # largeur MediaPipe (fausse)
-scale = ASSUMED_SHOULDER_WIDTH_CM / max(epaules_raw, 1.0)  # facteur correctif
+scale = _compute_scale(wlms, known_height_cm)
 ```
 
-Toutes les mesures sont ensuite multipliees par ce facteur :
+Cette fonction retourne le facteur d'echelle selon le mode choisi (taille connue ou fallback epaules). Toutes les mesures sont ensuite multipliees par ce facteur :
 
 ```python
 ds = lambda a, b: round(d(a, b) * scale, 1)
 ```
 
-La largeur d'epaules retournee est la valeur de reference (39 cm), pas la valeur MediaPipe brute :
+La largeur d'epaules et la hauteur sont calculees a partir des memes donnees scalées :
 
 ```python
-epaules = round(ASSUMED_SHOULDER_WIDTH_CM, 1)
+epaules_scaled = w3d(wlms, L_SHOULDER, R_SHOULDER) * scale
+hauteur = (nose_to_ankle * scale + corrections) * 0.65 + (shoulder_to_ankle * scale / 0.82) * 0.35
 ```
 
 Mesures calculees :
@@ -437,10 +445,10 @@ Cela signifie :
 Largeur taille = 30.0 cm, calculee depuis la vue face, confiance 84%.
 ```
 
-## `extraire_dos(wlms)`
+## `extraire_dos(wlms, known_height_cm=None)`
 
 ```python
-def extraire_dos(wlms: list) -> dict:
+def extraire_dos(wlms: list, known_height_cm: Optional[float] = None) -> dict:
 ```
 
 Cette fonction calcule quelques mesures depuis la vue de dos.
@@ -478,10 +486,10 @@ Dans `fusionner()`, on peut prendre la moyenne :
 EPAULES = 42.5
 ```
 
-## `extraire_profil(wlms)`
+## `extraire_profil(wlms, known_height_cm=None)`
 
 ```python
-def extraire_profil(wlms: list) -> dict:
+def extraire_profil(wlms: list, known_height_cm: Optional[float] = None) -> dict:
 ```
 
 Cette fonction calcule les profondeurs depuis la photo de profil.
