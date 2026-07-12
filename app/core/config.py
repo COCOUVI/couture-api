@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
 
     # ── MediaPipe ─────────────────────────────────────────────────────
-    MODEL_PATH: str = "pose_landmarker_heavy.task"   # Fichier modèle pré-téléchargé
+    MODEL_PATH: str = "pose_landmarker_full.task"     # Fichier modèle pré-téléchargé
     MIN_CONFIDENCE: float = 0.5                      # Seuil de confiance minimale
 
     # ── Cloudinary (suppression des images après traitement) ──────────
