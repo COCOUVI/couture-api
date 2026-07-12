@@ -77,10 +77,18 @@ def _interpolated_torso_depth(wlms: list, ratio: float) -> float:
 
 
 def _clamp(value: float, low: float, high: float) -> float:
+    """Limite une valeur entre un minimum et un maximum."""
     return round(min(max(value, low), high), 1)
 
 
 def _compute_scale(wlms: list, known_height_cm: Optional[float] = None) -> float:
+    """
+    Calcule le facteur d'echelle pour convertir les distances MediaPipe en cm reels.
+
+    Deux modes :
+    1. known_height_cm fourni -> scale = taille_connue / hauteur_brute_mediapipe
+    2. fallback -> scale = 39.0 / largeur_epaules_brute
+    """
     epaules_raw = w3d(wlms, L_SHOULDER, R_SHOULDER)
 
     if known_height_cm:
@@ -108,6 +116,7 @@ def _compute_scale(wlms: list, known_height_cm: Optional[float] = None) -> float
 
 
 def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
+    """Mesures depuis la vue de face : longueurs, largeurs, hauteur."""
     d = lambda a, b: w3d(wlms, a, b)
     scale = _compute_scale(wlms, known_height_cm)
     ds = lambda a, b: round(d(a, b) * scale, 1)
@@ -139,7 +148,6 @@ def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
     return {
         "HAUTEUR"  : (hauteur,   "face_stature", 0.84),
         "EPAULES"  : (round(epaules_scaled, 1), "face", 0.92),
-        "EPAULES"  : (epaules,   "face", 0.92),
         "BUSTE_L"  : (buste_l,   "face", 0.82),
         "TAILLE_L" : (taille_l,  "face", 0.84),
         "HANCHES_L": (hanches,   "face", 0.90),
@@ -154,6 +162,7 @@ def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
 
 
 def extraire_dos(wlms: list, known_height_cm: Optional[float] = None) -> dict:
+    """Mesures depuis la vue de dos : validation largeurs epaules, hanches, torse."""
     d = lambda a, b: w3d(wlms, a, b)
     scale = _compute_scale(wlms, known_height_cm)
     ds = lambda a, b: round(d(a, b) * scale, 1)
@@ -165,6 +174,7 @@ def extraire_dos(wlms: list, known_height_cm: Optional[float] = None) -> dict:
 
 
 def extraire_profil(wlms: list, known_height_cm: Optional[float] = None) -> dict:
+    """Mesures depuis la vue de profil : profondeurs buste, taille, hanches."""
     prof_epaule = round(abs(wlms[L_SHOULDER].z - wlms[R_SHOULDER].z) * 100, 1)
     prof_taille = _interpolated_torso_depth(wlms, 0.62)
     prof_hanche = round(abs(wlms[L_HIP].z - wlms[R_HIP].z) * 100, 1)
