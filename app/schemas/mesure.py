@@ -18,11 +18,12 @@ class MesureOut(BaseModel):
 
 class MesureRequest(BaseModel):
     """Schéma d'entrée : requête POST /measure."""
-    fiche_id:   str  = Field(..., description="ID de la FicheMesure créée par Laravel")
-    client_id:  str  = Field(..., description="ID du client")
-    face_url:   str  = Field(..., description="URL Cloudinary — vue de face")
-    dos_url:    str  = Field(..., description="URL Cloudinary — vue de dos")
-    profil_url: str  = Field(..., description="URL Cloudinary — vue de profil")
+    fiche_id:       str  = Field(..., description="ID de la FicheMesure créée par Laravel")
+    client_id:      str  = Field(..., description="ID du client")
+    face_url:       str  = Field(..., description="URL Cloudinary — vue de face")
+    dos_url:        str  = Field(..., description="URL Cloudinary — vue de dos")
+    profil_url:     str  = Field(..., description="URL Cloudinary — vue de profil")
+    known_height_cm: float | None = Field(None, description="Taille reelle de la personne en cm (optionnel, pour calibration exacte)")
 
 
 class MesureResponse(BaseModel):

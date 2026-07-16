@@ -47,7 +47,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
             img_face = await download_image_as_rgb(payload.face_url)
             logger.info("Image face téléchargée (%s)", payload.face_url)
             wlms_face = detect_world_landmarks(img_face)
-            m_face = extraire_face(wlms_face)
+            m_face = extraire_face(wlms_face, known_height_cm=payload.known_height_cm)
         except Exception as e:
             logger.error("Vue face — %s: %s", type(e).__name__, e)
             raise HTTPException(
@@ -59,7 +59,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
         try:
             img_dos = await download_image_as_rgb(payload.dos_url)
             wlms_dos = detect_world_landmarks(img_dos)
-            m_dos = extraire_dos(wlms_dos)
+            m_dos = extraire_dos(wlms_dos, known_height_cm=payload.known_height_cm)
         except Exception:
             pass
 
@@ -67,7 +67,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
         try:
             img_profil = await download_image_as_rgb(payload.profil_url)
             wlms_profil = detect_world_landmarks(img_profil)
-            m_profil = extraire_profil(wlms_profil)
+            m_profil = extraire_profil(wlms_profil, known_height_cm=payload.known_height_cm)
         except Exception:
             pass
 

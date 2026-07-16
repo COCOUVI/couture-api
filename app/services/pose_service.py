@@ -38,11 +38,34 @@ L_KNEE = 25;     R_KNEE = 26         # Genoux
 L_ANKLE = 27;    R_ANKLE = 28        # Chevilles
 
 
-# ── Alias vers l'API Tasks de MediaPipe ──────────────────────────────
+# Alias vers l'API Tasks de MediaPipe
 BaseOptions           = mp.tasks.BaseOptions
 PoseLandmarker        = mp.tasks.vision.PoseLandmarker
 PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
 VisionRunningMode     = mp.tasks.vision.RunningMode
+
+
+# ── Cache du detecteur (cree une seule fois) ─────────────────────────
+_detector = None
+
+
+def _get_detector():
+    """Retourne le PoseLandmarker global (cree une seule fois)."""
+    global _detector
+    if _detector is None:
+        ensure_model()
+        opts = PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=settings.MODEL_PATH),
+            running_mode=VisionRunningMode.IMAGE,
+            num_poses=1,
+            min_pose_detection_confidence=settings.MIN_CONFIDENCE,
+            min_pose_presence_confidence=settings.MIN_CONFIDENCE,
+            min_tracking_confidence=settings.MIN_CONFIDENCE,
+        )
+        _detector = PoseLandmarker.create_from_options(opts)
+        logger = __import__('logging').getLogger(__name__)
+        logger.info("PoseLandmarker cree (modele charge en memoire)")
+    return _detector
 
 
 #  Détection principale 
@@ -52,20 +75,10 @@ def detect_world_landmarks(img_rgb: np.ndarray) -> list:
     Retourne les world_landmarks (coordonnées 3D en mètres).
     Lève une ValueError si aucune pose n'est détectée.
     """
-    ensure_model()
+    detector = _get_detector()
 
-    opts = PoseLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=settings.MODEL_PATH),
-        running_mode=VisionRunningMode.IMAGE,
-        num_poses=1,
-        min_pose_detection_confidence=settings.MIN_CONFIDENCE,
-        min_pose_presence_confidence=settings.MIN_CONFIDENCE,
-        min_tracking_confidence=settings.MIN_CONFIDENCE,
-    )
-
-    with PoseLandmarker.create_from_options(opts) as detector:
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-        result   = detector.detect(mp_image)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+    result   = detector.detect(mp_image)
 
     if not result.pose_world_landmarks:
         raise ValueError("Pose non détectée — vérifiez que la personne est entièrement visible.")
