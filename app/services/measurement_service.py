@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Fallback : largeur d'epaules de reference (moyenne adulte)
 # Utilisee uniquement quand known_height_cm n'est pas fourni.
-#The ration are used to estimate the height from the shoulder width when the known height is not provided. The average shoulder width is assumed to be 39.0 cm for adults, which is used as a reference for scaling the measurements obtained from the MediaPipe landmarks, and come from anthropometric data. This value is used to calculate a scale factor that converts the raw distances measured in the MediaPipe coordinate system into real-world centimeters. The scale factor is computed by dividing the assumed shoulder width (39.0 cm) by the raw shoulder width obtained from the landmarks. This allows for an estimation of the person's height and other measurements when the actual height is not known.
+# The ration are used to estimate the height from the shoulder width when the known height is not provided. The average shoulder width is assumed to be 39.0 cm for adults, which is used as a reference for scaling the measurements obtained from the MediaPipe landmarks, and come from anthropometric data. This value is used to calculate a scale factor that converts the raw distances measured in the MediaPipe coordinate system into real-world centimeters. The scale factor is computed by dividing the assumed shoulder width (39.0 cm) by the raw shoulder width obtained from the landmarks. This allows for an estimation of the person's height and other measurements when the actual height is not known.
 ASSUMED_SHOULDER_WIDTH_CM = 39.0
 
 
@@ -47,7 +47,8 @@ _INTERNAL_CODES = {
 
 
 def _point_between(a, b, ratio: float) -> tuple[float, float, float]:
-    """Point 3D interpole entre deux landmarks MediaPipe."""
+    """Point 3D interpole entre deux landmarks MediaPipe.
+    ratio=0 → a, ratio=1 → b."""
     return (
         a.x + (b.x - a.x) * ratio,
         a.y + (b.y - a.y) * ratio,
@@ -64,7 +65,8 @@ def _distance_cm(p1: tuple[float, float, float], p2: tuple[float, float, float])
 
 
 def _interpolated_torso_width(wlms: list, ratio: float) -> float:
-    """Largeur du torse a une hauteur donnee entre epaules et hanches."""
+    """Largeur du torse a une hauteur donnee entre epaules et hanches.
+    ratio=0.30 pour poitrine, 0.62 pour ceinture."""
     left = _point_between(wlms[L_SHOULDER], wlms[L_HIP], ratio)
     right = _point_between(wlms[R_SHOULDER], wlms[R_HIP], ratio)
     return _distance_cm(left, right)
@@ -84,11 +86,13 @@ def _clamp(value: float, low: float, high: float) -> float:
 
 def _compute_scale(wlms: list, known_height_cm: Optional[float] = None) -> float:
     """
-    Calcule le facteur d'echelle pour convertir les distances MediaPipe en cm reels.
+    Facteur d'echelle pour convertir les distances MediaPipe en cm reels.
 
-    Deux modes :
-    1. known_height_cm fourni -> scale = taille_connue / hauteur_brute_mediapipe
-    2. fallback -> scale = 39.0 / largeur_epaules_brute
+    Si known_height_cm fourni :
+      - Estime la hauteur brute via deux methodes combinees (nez 65%, epaules 35%)
+      - scale = taille_connue / hauteur_estimee
+    Sinon (fallback) :
+      - scale = ASSUMED_SHOULDER_WIDTH_CM / largeur_epaules_brute
     """
     epaules_raw = w3d(wlms, L_SHOULDER, R_SHOULDER)
 
@@ -117,7 +121,8 @@ def _compute_scale(wlms: list, known_height_cm: Optional[float] = None) -> float
 
 
 def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
-    """Mesures depuis la vue de face : longueurs, largeurs, hauteur."""
+    """Mesures depuis la vue de face : longueurs, largeurs, hauteur.
+    Retourne {code: (valeur, source, confiance)}."""
     distance_landmarks = lambda a, b: w3d(wlms, a, b)
     scale = _compute_scale(wlms, known_height_cm)
     distance_landmarks_scaled = lambda a, b: round(distance_landmarks(a, b) * scale, 1)
@@ -133,7 +138,6 @@ def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
     longueur_cuisse = avg(distance_landmarks_scaled(L_HIP, L_KNEE), distance_landmarks_scaled(R_HIP, R_KNEE))
     longueur_mollet = avg(distance_landmarks_scaled(L_KNEE, L_ANKLE), distance_landmarks_scaled(R_KNEE, R_ANKLE))
 
-    # Hauteur : calculee a partir des memes donnees brutes, puis scalée via _compute_scale
     shoulder_y = (wlms[L_SHOULDER].y + wlms[R_SHOULDER].y) / 2
     ankle_y = (wlms[L_ANKLE].y + wlms[R_ANKLE].y) / 2
     nose_to_ankle = abs(wlms[NOSE].y - ankle_y) * 100 * scale
@@ -163,7 +167,7 @@ def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
 
 
 def extraire_dos(wlms: list, known_height_cm: Optional[float] = None) -> dict:
-    """Mesures depuis la vue de dos : validation largeurs epaules, hanches, torse."""
+    """Mesures depuis la vue de dos : recalage des mesures face."""
     distance_landmarks = lambda a, b: w3d(wlms, a, b)
     scale = _compute_scale(wlms, known_height_cm)
     distance_landmarks_scaled = lambda a, b: round(distance_landmarks(a, b) * scale, 1)
@@ -175,7 +179,7 @@ def extraire_dos(wlms: list, known_height_cm: Optional[float] = None) -> dict:
 
 
 def extraire_profil(wlms: list, known_height_cm: Optional[float] = None) -> dict:
-    """Mesures depuis la vue de profil : profondeurs buste, taille, hanches."""
+    """Mesures depuis la vue de profil : profondeurs axe Z pour ellipses."""
     profondeur_buste = round(abs(wlms[L_SHOULDER].z - wlms[R_SHOULDER].z) * 100, 1)
     profondeur_ceinture = _interpolated_torso_depth(wlms, 0.62)
     profondeur_hanche = round(abs(wlms[L_HIP].z - wlms[R_HIP].z) * 100, 1)
@@ -195,6 +199,16 @@ def fusionner(m_face: dict, m_dos: dict, m_profil: dict) -> list[dict]:
     """
     Fusionne les 3 vues, calcule les circonferences,
     retourne une liste de dicts prets pour la DB.
+
+    1. Agrège toutes les mesures dans un dict.
+    2. Moyenne des mesures redondantes (epaules face+dos, torse 3 vues).
+    3. Calcule les circonferences :
+       - Si profil disponible : formule de Ramanujan (ellipse)
+       - Sinon : ratios ISO 8559
+    4. Garde-fou : ceinture bornee par rapport a poitrine/hanches.
+    5. Circonferences derivees (cou, genou, poignet) par ratios.
+    6. Filtre les codes internes et valeurs <= 0.
+    7. Formate avec metadonnees pour insertion DB.
     """
     raw = {**m_face, **m_dos, **m_profil}
 
@@ -215,7 +229,6 @@ def fusionner(m_face: dict, m_dos: dict, m_profil: dict) -> list[dict]:
     profondeur_hanche = raw.get("PROFONDEUR_HANCHE", (0,))[0]
 
     if profondeur_buste > 0 and profondeur_ceinture > 0 and largeur_buste > 0 and largeur_ceinture > 0:
-        # Calcul par ellipse (Ramanujan) : largeur = grand axe, profondeur = petit axe.
         demi_largeur_buste = largeur_buste / 2
         demi_profondeur_buste = max(profondeur_buste / 2, demi_largeur_buste * 0.45)
         demi_largeur_ceinture = largeur_ceinture / 2
@@ -230,7 +243,6 @@ def fusionner(m_face: dict, m_dos: dict, m_profil: dict) -> list[dict]:
         confiance_ceinture = 0.86
         confiance_hanches = 0.86
     else:
-        # Fallback : ratios approximatifs quand la vue profil manque.
         tour_poitrine = round(largeur_buste * 3.35, 1)
         tour_hanches = round(largeur_hanches * 3.35, 1)
         tour_ceinture = round((largeur_ceinture or largeur_hanches * 0.82) * 3.20, 1)
@@ -238,7 +250,6 @@ def fusionner(m_face: dict, m_dos: dict, m_profil: dict) -> list[dict]:
         confiance_poitrine = confiance_ceinture = confiance_hanches = 0.72
 
     if tour_poitrine > 0 and tour_hanches > 0 and tour_ceinture > 0:
-        # Garde-fou morphologique contre les petites rotations et poses asymetriques.
         min_tour_ceinture = min(tour_poitrine, tour_hanches) * 0.62
         max_tour_ceinture = min(tour_poitrine, tour_hanches) * 1.03
         tour_ceinture = _clamp(tour_ceinture, min_tour_ceinture, max_tour_ceinture)
