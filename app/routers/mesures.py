@@ -10,7 +10,7 @@ from app.core.database import get_db
 from app.models.fiche_mesure import FicheMesure
 from app.models.mesure import Mesure
 from app.models.type_mesure import TypeMesure
-from app.schemas.mesure import MesureRequest, MesureResponse, MesureOut
+from app.schemas.mesure import CleanupRequest, MesureRequest, MesureResponse, MesureOut
 from app.services.download_service import download_image_as_rgb
 from app.services.measurement_service import extraire_face, extraire_dos, extraire_profil, fusionner
 from app.services.pose_service import detect_world_landmarks
@@ -29,6 +29,8 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
     télécharge les images, exécute MediaPipe,
     calcule les mesures et les stocke en DB.
     """
+    urls = [payload.face_url, payload.dos_url, payload.profil_url]
+
     try:
         # 1. Vérification de l'existence de la fiche en DB
         fiche = db.query(FicheMesure).filter(
@@ -108,16 +110,6 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
 
         db.commit()
 
-        # 8. Nettoyage : suppression des images Cloudinary
-        try:
-            await cleanup_cloudinary_images([
-                payload.face_url,
-                payload.dos_url,
-                payload.profil_url,
-            ])
-        except Exception:
-            pass
-
         return MesureResponse(
             fiche_id=payload.fiche_id,
             client_id=payload.client_id,
@@ -142,6 +134,29 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erreur interne: {str(e)}",
+        )
+    finally:
+        try:
+            await cleanup_cloudinary_images(urls)
+        except Exception:
+            pass
+
+
+# ── POST /measure/cleanup — suppression manuelle d'images Cloudinary ──
+@router.post("/cleanup", status_code=status.HTTP_200_OK)
+async def cleanup_images(payload: CleanupRequest):
+    """
+    Supprime une ou plusieurs images de Cloudinary.
+    Utile pour le nettoyage manuel depuis le client mobile ou Laravel
+    après un échec d'upload ou d'analyse.
+    """
+    try:
+        await cleanup_cloudinary_images(payload.urls)
+        return {"status": "ok", "deleted": len(payload.urls)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur nettoyage Cloudinary: {str(e)}",
         )
 
 

@@ -3,6 +3,11 @@ from pydantic import BaseModel, Field
 from typing import List
 
 
+class CleanupRequest(BaseModel):
+    """Schéma d'entrée : requête POST /measure/cleanup."""
+    urls: list[str] = Field(..., description="Liste des URLs Cloudinary à supprimer")
+
+
 class MesureOut(BaseModel):
     """Schéma de sortie : une mesure individuelle."""
     type_mesure_code: str
