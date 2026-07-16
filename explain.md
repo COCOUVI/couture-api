@@ -395,6 +395,16 @@ hauteur = round((height_from_nose * 0.65) + (height_from_shoulders * 0.35), 1)
 
 `nose_to_ankle` et `shoulder_to_ankle` sont en cm bruts (raw). On les multiplie par `scale` pour obtenir les cm reels. `head_top_extra` et `foot_extra` utilisent `largeur_epaules_scaled * ratio`, donc deja dans la bonne echelle.
 
+### Mais pourquoi recalculer la hauteur si l'utilisateur a déjà donne sa taille ?
+
+`known_height_cm` est **optionnel** (`Optional[float] = None`). La fonction `_compute_scale` est un helper qui **ne retourne que le facteur d'echelle**. Il y a deux cas :
+
+1. **Si l'user fournit sa taille** → `_compute_scale` utilise `known_height_cm` uniquement pour calculer le `scale` (calibration). La `hauteur` est ensuite recalculee dans `extraire_face` et renvoyee au frontend comme toutes les autres mesures. Meme si la valeur est proche de `known_height_cm`, elle sert de **valeur de coherence** : si l'estimation photo s'eloigne trop de la taille donnee, le score de confiance (0.84) sera faible, signalant une photo de mauvaise qualite.
+
+2. **Si l'user ne fournit pas sa taille** → `_compute_scale` utilise le fallback (largeur d'epaules moyenne a 39 cm). Sans le recalcul dans `extraire_face`, il n'y aurait **aucune estimation de la hauteur**. La `hauteur` est donc indispensable dans ce cas.
+
+Le code est uniforme : `extraire_face` assemble toujours le meme dictionnaire de mesures, independamment de la methode de calibration employee (`known_height_cm` ou fallback). C'est un choix de conception pour eviter de dupliquer la logique.
+
 ### Aucun `clamp` restrictif
 
 L'ancien `_clamp(estimated, shoulder_to_ankle * 1.08, shoulder_to_ankle * 1.30)` a ete supprime. Il limitait la hauteur a 130% du segment epaules-chevilles, ce qui bloquait la correction apportee par la calibration. Exemple : une personne de 160 cm avec un segment epaules-chevilles MediaPipe de 70 cm etait plafonnee a 91 cm, meme apres calibration.
