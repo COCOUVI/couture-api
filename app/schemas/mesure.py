@@ -28,7 +28,7 @@ class MesureRequest(BaseModel):
     face_url:       str  = Field(..., description="URL Cloudinary — vue de face")
     dos_url:        str  = Field(..., description="URL Cloudinary — vue de dos")
     profil_url:     str  = Field(..., description="URL Cloudinary — vue de profil")
-    known_height_cm: float | None = Field(None, description="Taille reelle de la personne en cm (optionnel, pour calibration exacte)")
+    known_height_cm: float = Field(..., description="Taille reelle de la personne en cm")
 
 
 class MesureResponse(BaseModel):
