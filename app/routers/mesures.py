@@ -71,6 +71,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
                     external_id=uuid.uuid4(),
                     code=m["type_mesure_code"],
                     nom=m["label"],
+                    description=m["label"],
                     unite=m["unite"],
                     categorie=m["categorie"],
                     est_actif=True,
