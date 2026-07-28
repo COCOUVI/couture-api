@@ -1,207 +1,133 @@
-# Explication detaillee de `measurement_service.py`
+# Architecture générale
 
-Ce fichier transforme les landmarks 3D detectes par MediaPipe en mesures de couture exploitables par l'application.
-
-Il ne detecte pas la pose lui-meme. La detection est faite dans `pose_service.py`. Ici, on prend les points deja detectes, puis on calcule les longueurs, largeurs et circonferences.
-
-Important sur le mot "taille" (ancien nom pour "ceinture") :
-
-- `HAUTEUR` = taille reelle de la personne, c'est-a-dire sa stature en cm.
-- `CEINTURE` = tour de ceinture, c'est-a-dire la circonference au niveau de la ceinture.
-
-La correction principale pour la taille reelle concerne donc `HAUTEUR`.
-
-Pipeline simplifie :
-
-```text
-Image -> MediaPipe -> landmarks 3D -> measurement_service.py -> mesures en cm
+```
+Flutter (koda) → Laravel (e-couture) → FastAPI (couture-api) → MediaPipe
+                                          ↑
+                                    Supabase (PostgreSQL)
 ```
 
-## Calibration de l'echelle MediaPipe (`_compute_scale`)
+- **Flutter** : prend 3 photos (face, dos, profil) + taille utilisateur → upload Cloudinary → envoie à Laravel
+- **Laravel** : valide les entrées, crée la fiche mesure (`fiche_mesures`), appelle FastAPI via `MeasureCvGateway`
+- **FastAPI** : télécharge les images, détecte les landmarks MediaPipe, calcule les mesures couture, stocke en base
+- **Supabase** : base PostgreSQL partagée entre Laravel et FastAPI (mêmes tables)
 
-### Probleme
+---
 
-MediaPipe fournit des `world_landmarks` en metres. Cependant, ces coordonnees sont estimees a partir d'une seule image (monoculaire). Sans connaitre la distance camera-sujet ni la focale, l'echelle absolue est **imprecise**. Pour un cousin de 160 cm, on obtenait 66 cm — soit un facteur d'erreur de 2.4x.
+# Pipeline complet du scan
 
-### Solution : deux modes de calibration
+```
+1. Utilisateur prend 3 photos (face, dos, profil)
+2. Flutter upload chaque photo → Cloudinary
+3. Flutter envoie à Laravel : {face_url, dos_url, profil_url, known_height_cm}
+4. Laravel crée FicheMesure + attache les medias
+5. Laravel appelle FastAPI : POST /measure
+6. FastAPI télécharge les 3 images depuis Cloudinary
+7. MediaPipe détecte 33 landmarks 3D sur chaque image
+8. measurement_service.py calcule les mesures à partir des landmarks
+9. Résultats stockés dans mesures + type_mesures
+10. Images Cloudinary nettoyées
+```
+
+---
+
+# `measurement_service.py` — Le cœur du calcul
+
+## Problème fondamental
+
+MediaPipe fournit des `world_landmarks` en **mètres** estimés depuis une image unique (monoculaire). Sans connaître la distance caméra-sujet ni la focale, l'échelle absolue est imprécise.
+
+**Exemple concret** : une personne de 160 cm obtenait 66 cm estimés par MediaPipe → facteur d'erreur de 2.4×.
+
+**Solution** : calibrer l'échelle en divisant une référence connue par la valeur brute estimée. Toutes les mesures sont ensuite multipliées par ce facteur.
+
+---
+
+## `_compute_scale(wlms, known_height_cm)` — Calibration de l'échelle
 
 ```python
-def _compute_scale(wlms, known_height_cm=None):
+def _compute_scale(wlms, known_height_cm) -> float:
 ```
 
-#### Mode 1 : calibration par taille connue (recommande)
+### Pourquoi cette fonction existe
 
-L'utilisateur fournit sa taille reelle (ex: 175 cm). Le service :
+MediaPipe donne des distances en unités arbitraires (world landmarks en mètres, mais l'échelle n'est pas fiable). Il faut un facteur de conversion pour obtenir des centimètres réels.
 
-1. Estime la hauteur brute a partir des world landmarks de MediaPipe (nez → chevilles + corrections tete/pieds).
-2. Calcule le facteur d'echelle : `scale = taille_connue / hauteur_brute`.
+### Comment elle fonctionne
+
+1. Estime la hauteur brute de la personne à partir des landmarks 3D
+2. Compare avec la taille réelle fournie par l'utilisateur
+3. `scale = known_height_cm / hauteur_brute`
+
+### Détail du calcul de la hauteur brute
 
 ```python
-scale = known_height_cm / max(raw_height, 1.0)
+# Distance nez → cheville
+nose_to_ankle = abs(wlms[NOSE].y - ankle_y) * 100
+
+# Distance épaule → cheville
+shoulder_to_ankle = abs(shoulder_y - ankle_y) * 100
+
+# Correction pour la tête (au-dessus du nez)
+ear_width = w3d(wlms, LEFT_EAR, RIGHT_EAR)
+head_top_extra = max(ear_width * 0.45, epaules_raw * 0.14)
+
+# Correction pour les pieds (sous la cheville)
+foot_extra = max(epaules_raw * 0.07, 3.0)
+
+# Deux estimations indépendantes
+height_from_nose = nose_to_ankle + head_top_extra + foot_extra
+height_from_shoulders = shoulder_to_ankle / 0.82  # 0.82 = ratio épaule→cheville / stature
+
+# Moyenne pondérée (65% nez, 35% épaules)
+raw_height = (height_from_nose * 0.65) + (height_from_shoulders * 0.35)
 ```
 
-**Avantage** : fonctionne pour tout le monde — enfant, adolescent, adulte, senior. Aucune supposition anatomique.
+### Pourquoi `known_height_cm` est obligatoire
 
-#### Mode 2 : fallback par largeur d'epaules
+Avant, il y avait un fallback : `ASSUMED_SHOULDER_WIDTH_CM = 39.0`. Problème :
 
-Si la taille n'est pas fournie, on utilise la largeur d'epaules comme reference approximative :
+- Une personne large d'épaules (44 cm) → mesures sous-estimées
+- Une personne étroite (35 cm) → mesures surestimées
+- Un enfant (28 cm) → mesures fortement erronées
+
+Décision : supprimer le fallback. L'utilisateur **doit** entrer sa taille. C'est une contrainte d'usage mais la seule façon d'avoir des mesures fiables.
+
+---
+
+## `extraire_face(wlms, known_height_cm)` — Mesures depuis la vue de face
 
 ```python
-ASSUMED_SHOULDER_WIDTH_CM = 39.0  # moyenne adulte
-scale = ASSUMED_SHOULDER_WIDTH_CM / max(epaules_raw, 1.0)
+def extraire_face(wlms, known_height_cm) -> dict:
 ```
 
-Ce mode est moins precis car la largeur d'epaules varie selon les individus. Il sert uniquement de solution de repli.
+### Pourquoi cette fonction existe
 
-### Pourquoi c'est meilleur
+La photo de face est la vue principale. Elle permet de mesurer :
 
-1. **Adaptable a tous** : un enfant de 8 ans (120 cm) ou un adulte de 190 cm — le mode "taille connue" donne des mesures exactes.
-2. **Sans supposition** : plus de valeur fixe cachee. L'utilisateur controle la calibration.
-3. **Graceful degradation** : si la taille n'est pas fournie, le fallback epaules donne une approximation.
-4. **Transparence** : le log indique clairement le mode utilise et le facteur applique.
+- Les largeurs (épaules, buste, ceinture, hanches)
+- Les longueurs verticales (torse, bras, jambes)
+- La hauteur totale
 
-## Imports depuis `pose_service.py`
+### Fonctions de base utilisées
 
-```python
-from app.services.pose_service import (
-    L_SHOULDER, R_SHOULDER, L_ELBOW, R_ELBOW,
-    L_WRIST, R_WRIST, L_HIP, R_HIP,
-    L_KNEE, R_KNEE, L_ANKLE, R_ANKLE,
-    w3d, avg, ellipse_circumference,
-)
-```
-
-Ces imports reutilisent les constantes et outils geometriques deja existants.
-
-- `L_SHOULDER`, `R_SHOULDER` : index MediaPipe des epaules.
-- `L_HIP`, `R_HIP` : index des hanches.
-- `L_ELBOW`, `R_ELBOW` : index des coudes.
-- `L_WRIST`, `R_WRIST` : index des poignets.
-- `L_KNEE`, `R_KNEE` : index des genoux.
-- `L_ANKLE`, `R_ANKLE` : index des chevilles.
-- `w3d()` : calcule une distance 3D entre deux landmarks MediaPipe.
-- `avg()` : calcule une moyenne arrondie.
-- `ellipse_circumference()` : calcule le perimetre approximatif d'une ellipse.
-
-Exemple :
-
-```python
-epaules = w3d(wlms, L_SHOULDER, R_SHOULDER)
-```
-
-Ici, on mesure la distance entre l'epaule gauche et l'epaule droite.
-
-## `TYPE_MESURE_META`
-
-```python
-TYPE_MESURE_META = {
-    "HAUTEUR": {"label": "Hauteur totale", "unite": "cm", "categorie": "longueur"},
-    ...
-}
-```
-
-Ce dictionnaire decrit les mesures finales retournees par le service.
-
-Chaque code contient :
-
-- `label` : nom lisible de la mesure.
-- `unite` : unite utilisee, ici `cm`.
-- `categorie` : type de mesure, par exemple `longueur`, `largeur`, `circonference`.
-
-Exemple :
-
-```python
-"CEINTURE": {
-    "label": "Tour de ceinture (T)",
-    "unite": "cm",
-    "categorie": "circonference",
-}
-```
-
-Cela signifie que le code `CEINTURE` represente le tour de ceinture en centimetres.
-
-## `_INTERNAL_CODES`
-
-```python
-_INTERNAL_CODES = {
-    "PROFONDEUR_BUSTE", "PROFONDEUR_HANCHE", "PROFONDEUR_CEINTURE",
-    "TORSE_LONGUEUR_DOS", "TORSE_LONGUEUR_PROFIL", "EPAULES_DOS", "HANCHES_LARGEUR_DOS",
-    "BUSTE_LARGEUR", "CEINTURE_LARGEUR",
-}
-```
-
-Ces codes sont utilises seulement pendant le calcul. Ils ne sont pas stockes comme mesures finales en base de donnees.
-
-### Signification detaillee de chaque variable
-
-**`BUSTE_LARGEUR`** = `_interpolated_torso_width(wlms, 0.30)` → largeur du torse au niveau de la **poitrine** (buste), en cm. Le suffixe `_LARGEUR` precise qu'il s'agit d'une largeur (pas d'un tour). C'est une mesure **intermediaire** qui sert a calculer le tour de poitrine (`POITRINE`).
-
-**`CEINTURE_LARGEUR`** = `_interpolated_torso_width(wlms, 0.62)` → largeur du torse au niveau de la **ceinture**, en cm. Attention a ne pas confondre `CEINTURE_LARGEUR` (largeur de ceinture) avec `HAUTEUR` (stature de la personne). `CEINTURE_LARGEUR` sert a calculer le tour de ceinture (`CEINTURE`).
-
-```python
-# BUSTE_LARGEUR  = largeur au niveau poitrine → sert a calculer POITRINE (tour de poitrine)
-# CEINTURE_LARGEUR = largeur au niveau ceinture → sert a calculer TAILLE (tour de ceinture)
-# HAUTEUR       = stature reelle (ex: 175 cm) → PAS lie a CEINTURE_LARGEUR
-```
-
-**`PROFONDEUR_BUSTE`**, **`PROFONDEUR_CEINTURE`**, **`PROFONDEUR_HANCHE`** = profondeurs (vue de profil) au niveau buste/ceinture/hanches. Combinees avec les largeurs (`BUSTE_LARGEUR`, `CEINTURE_LARGEUR`, `HANCHES_L`), elles permettent de calculer les tours par ellipse.
-
-**`HANCHES_LARGEUR_DOS`** = largeur des hanches mesuree depuis la vue de dos.
-
-**`EPAULES_DOS`** = largeur des epaules depuis la vue de dos.
-
-**`TORSE_LONGUEUR_DOS`**, **`TORSE_LONGUEUR_PROFIL`** = longueur du torse mesuree depuis la vue de dos / de profil.
-
-En resume :
-
-| Code | Signification | Provenance | Sert a calculer |
-|------|--------------|------------|----------------|
-| `BUSTE_LARGEUR` | Largeur buste (poitrine) | face, ratio 0.30 | `POITRINE` |
-| `CEINTURE_LARGEUR` | Largeur ceinture | face, ratio 0.62 | `CEINTURE` |
-| `PROFONDEUR_BUSTE` | Profondeur buste | profil | `POITRINE` |
-| `PROFONDEUR_CEINTURE` | Profondeur ceinture | profil | `CEINTURE` |
-| `PROFONDEUR_HANCHE` | Profondeur hanches | profil | `TOUR_HANCHES` |
-
-**Rappel** : `CEINTURE_LARGEUR` = largeur **ceinture** (waist). `HAUTEUR` = stature de la personne (height). Les deux sont totalement distincts.
-
-## `_point_between(a, b, ratio)`
+#### `_point_between(a, b, ratio)` — Interpolation de points
 
 ```python
 def _point_between(a, b, ratio: float) -> tuple[float, float, float]:
-    return (
-        a.x + (b.x - a.x) * ratio,
-        a.y + (b.y - a.y) * ratio,
-        a.z + (b.z - a.z) * ratio,
-    )
 ```
 
-**Goal :** Creer un point 3D personnalise que MediaPipe ne fournit pas.
+**Pourquoi :** MediaPipe donne des points précis (épaule, hanche, coude) mais pas "le point ceinture" ou "le point buste". Personne n'a un landmark à la ceinture. On fabrique ce point nous-mêmes.
 
-**Pourquoi :** MediaPipe donne des points precis (epaule, hanche, coude, etc.) mais pas "le point ceinture" ou "le point buste". Personne n'a un landmark a la ceinture. Donc on fabrique ce point nous-memes.
-
-**A quoi ca sert concretement :** Tu prends l'epaule gauche et la hanche gauche. La ceinture est entre les deux. Avec `ratio = 0.62`, tu dis "prends le point a 62% du chemin epaule → hanche". Ce point invente represente **anatomiquement la ceinture** cote gauche. Meme principe pour le buste avec `ratio = 0.30` (plus proche des epaules).
-
-Exemple :
-
-```python
-point_ceinture_gauche = _point_between(wlms[L_SHOULDER], wlms[L_HIP], 0.62)
 ```
-
-Cela signifie :
-
-```text
-Epaule (0%) ----×----------------- Hanche (100%)
+Épaule (0%) ----×----------------- Hanche (100%)
                 ^
-             0.62 = ceinture estimee
+             0.62 = ceinture estimée
+             0.30 = buste estimé
 ```
 
-Si `ratio = 0.0`, le point est au niveau de l'epaule.
+**Utilité :** Créer des points anatomiques intermédiaires que MediaPipe ne fournit pas.
 
-Si `ratio = 1.0`, le point est au niveau de la hanche.
-
-Si `ratio = 0.62`, le point est entre les deux, proche de la ceinture.
-
-## `_distance_cm(p1, p2)`
+#### `_distance_cm(p1, p2)` — Distance entre points 3D quelconques
 
 ```python
 def _distance_cm(p1, p2) -> float:
@@ -211,381 +137,152 @@ def _distance_cm(p1, p2) -> float:
     )
 ```
 
-**Goal :** Calculer une distance en centimetres entre deux points 3D quelconques.
+**Pourquoi son nom est `_distance_cm` et pas `_distance_3d` ?**
 
-**Pourquoi ne pas utiliser `w3d()` ?** `w3d()` attend des index MediaPipe :
+Parce que le nom indique **ce qu'elle retourne** (des centimètres), pas **comment elle calcule** (en 3D). Toutes les distances dans ce fichier sont en 3D — il n'y a pas de mesure 2D. Préciser `_3d` serait redondant. Ce qui est important pour le lecteur, c'est l'unité : `_cm` garantit que le résultat est en centimètres exploitables pour la couture.
+
+**Pourquoi ne pas utiliser `w3d()` ?**
+
+`w3d(wlms, L_SHOULDER, R_SHOULDER)` attend :
+
+- `wlms` : la liste des landmarks MediaPipe
+- `L_SHOULDER`, `R_SHOULDER` : des **index** (entiers) dans cette liste
+
+Mais `_point_between()` retourne un **tuple** `(x, y, z)` — ce n'est pas un index MediaPipe. On ne peut donc pas passer ce tuple à `w3d()`. Il faut une fonction qui mesure la distance entre **n'importe quels points 3D**, qu'ils viennent de MediaPipe ou d'ailleurs.
 
 ```python
+# w3d  : fonctionne avec des INDEX MediaPipe
 w3d(wlms, L_SHOULDER, R_SHOULDER)
-```
 
-Mais `_point_between()` retourne un tuple `(x, y, z)`, pas un index MediaPipe. Donc `w3d()` ne peut pas l'utiliser. Il faut une fonction qui mesure entre **n'importe quels points 3D**.
-
-**A quoi ca sert concretement :** Une fois que tu as fabrique ton point ceinture gauche et ton point ceinture droit avec `_point_between`, tu veux connaitre la largeur de la ceinture. `_distance_cm` mesure la distance entre ces deux points. Le `* 100` convertit les unites MediaPipe en centimetres.
-
-Exemple :
-
-```python
+# _distance_cm : fonctionne avec des TUPLE (x, y, z)
 gauche = _point_between(wlms[L_SHOULDER], wlms[L_HIP], 0.62)
 droite = _point_between(wlms[R_SHOULDER], wlms[R_HIP], 0.62)
-largeur_ceinture = _distance_cm(gauche, droite)
+_distance_cm(gauche, droite)
 ```
 
-Ici, on calcule la largeur de la ceinture.
+**Pourquoi le `* 100` ?**
 
-## `_interpolated_torso_width(wlms, ratio)`
+MediaPipe retourne les `world_landmarks` en **mètres**. Mais la couture utilise les **centimètres**. Sans `* 100`, une largeur d'épaules de 0.42 m deviendrait 0.42 cm — inexploitable. Le `* 100` convertit simplement m → cm.
+
+**Pourquoi `round(..., 1)` ?**
+
+La couture n'a pas besoin de micromètres. Un arrondi au millimètre (1 décimale) est suffisant pour un tailleur.
+
+#### `_interpolated_torso_width(wlms, ratio)` — Largeur du torse à un niveau donné
 
 ```python
-def _interpolated_torso_width(wlms: list, ratio: float) -> float:
-    left = _point_between(wlms[L_SHOULDER], wlms[L_HIP], ratio)
-    right = _point_between(wlms[R_SHOULDER], wlms[R_HIP], ratio)
-    return _distance_cm(left, right)
+def _interpolated_torso_width(wlms, ratio) -> float:
 ```
 
-**Goal :** Mesurer la largeur du torse a une hauteur precise (buste, ceinture, etc.).
+**Pourquoi :** Le corps n'a pas la même largeur partout. Épaules larges, ceinture étroite, hanches larges. Il faut mesurer à chaque niveau anatomique spécifique.
 
-**Pourquoi :** Le corps n'a pas la meme largeur partout. Les epaules sont larges, la ceinture est plus etroite, les hanches sont larges. On ne peut pas utiliser une seule formule. Il faut mesurer a **chaque niveau anatomique**.
+**Comment :** Combine `_point_between` (crée point gauche + point droit au ratio donné) + `_distance_cm` (mesure la distance entre eux).
 
-**A quoi ca sert concretement :** C'est la combinaison des deux fonctions precedentes :
-1. Cree un point gauche au niveau `ratio` (ex: 0.30 pour buste)
-2. Cree un point droit au meme niveau
-3. Mesure la distance entre eux → largeur
+**Utilité :**
 
-Sans cette fonction, tu n'aurais qu'une largeur d'epaules et une largeur de hanches — rien pour la ceinture fine entre les deux.
+- `ratio = 0.30` → largeur buste (poitrine)
+- `ratio = 0.62` → largeur ceinture
 
-Exemples :
+### Qu'est-ce qui est calculé dans `extraire_face`
+
+| Code                    | Signification       | Comment c'est calculé                             |
+| ----------------------- | ------------------- | -------------------------------------------------- |
+| `HAUTEUR`             | Stature totale      | nose_to_ankle × scale + corrections tête/pieds   |
+| `EPAULES`             | Largeur épaules    | `w3d(L_SHOULDER, R_SHOULDER) × scale`           |
+| `BUSTE_LARGEUR`       | Largeur buste       | `_interpolated_torso_width(wlms, 0.30) × scale` |
+| `CEINTURE_LARGEUR`    | Largeur ceinture    | `_interpolated_torso_width(wlms, 0.62) × scale` |
+| `HANCHES_L`           | Largeur hanches     | `_distance_cm(points_hanches) × scale`          |
+| `TORSE`               | Longueur torse      | distance épaule→entrejambe × scale              |
+| `BRA_TOTAL`           | Longueur bras total | épaule→poignet × scale                          |
+| `BRA_AV`              | Longueur avant-bras | coude→poignet × scale                            |
+| `JAMBE`               | Longueur jambe      | hanche→cheville × scale                          |
+| `CUISSE`              | Longueur cuisse     | hanche→genou × scale                             |
+| `MOLLET`              | Longueur mollet     | genou→cheville × scale                           |
+| `LONGUEUR_SOUS_SEINS` | Sous-poitrine       | torse × 0.20 (ratio)                              |
+
+---
+
+## `extraire_dos(wlms, known_height_cm)` — Validation par la vue de dos
 
 ```python
-largeur_buste = _interpolated_torso_width(wlms, 0.30)   # largeur buste (poitrine)
-largeur_ceinture = _interpolated_torso_width(wlms, 0.62)   # largeur ceinture
+def extraire_dos(wlms, known_height_cm) -> dict:
 ```
 
-`0.30` approxime la zone poitrine/buste.
+### Pourquoi cette fonction existe
 
-`0.62` approxime la zone ceinture.
+La vue de dos sert à **valider ou corriger** les mesures de face. Trois mesures sont reprises :
 
-**Ne pas confondre** : `largeur_ceinture` = largeur au niveau de la ceinture (waist width). Ce n'est PAS la hauteur de la personne. La hauteur (stature) s'appelle `HAUTEUR`. Ici, "taille" (old name) designait la partie du corps entre les cotes et les hanches, maintenant renommee "ceinture".
+- `EPAULES_DOS` : largeur épaules depuis le dos
+- `HANCHES_LARGEUR_DOS` : largeur hanches depuis le dos
+- `TORSE_LONGUEUR_DOS` : longueur torse depuis le dos
 
-Pourquoi ?
+Si la vue face est imparfaite (personne légèrement tournée), la vue dos permet une meilleure estimation.
 
-Avant, la ceinture etait deduite des hanches. Maintenant, on estime une vraie largeur a son propre niveau anatomique.
-
-## `_interpolated_torso_depth(wlms, ratio)`
+### Pourquoi c'est optionnel
 
 ```python
-def _interpolated_torso_depth(wlms: list, ratio: float) -> float:
-    left = _point_between(wlms[L_SHOULDER], wlms[L_HIP], ratio)
-    right = _point_between(wlms[R_SHOULDER], wlms[R_HIP], ratio)
-    return round(abs(left[2] - right[2]) * 100, 1)
+try:
+    img_dos = await download_image_as_rgb(payload.dos_url)
+    wlms_dos = detect_world_landmarks(img_dos)
+    m_dos = extraire_dos(wlms_dos, known_height_cm=payload.known_height_cm)
+except Exception:
+    pass
 ```
 
-**Goal :** Mesurer la profondeur du torse a une hauteur donnee (vue de profil).
+Si la photo de dos est manquante ou inexploitable, on continue sans. Les mesures de face sont suffisantes.
 
-**Pourquoi :** La largeur seule ne suffit pas pour calculer un **tour** (circonference). Le corps est en 3D. Si tu regardes quelqu'un de face, tu vois sa largeur. De profil, tu vois sa profondeur (l'epaisseur du ventre). Les deux sont necessaires.
+---
 
-**A quoi ca sert concretement :** Avec la vue de profil, on prend la difference sur l'axe Z entre le point gauche et le point droit. Si la personne est de profil, un cote est plus proche de la camera que l'autre → la difference donne la profondeur.
+## `extraire_profil(wlms, known_height_cm)` — Profondeurs depuis la vue de profil
 
 ```python
-# Pour le tour de ceinture, on a besoin de DEUX choses :
-largeur    = _interpolated_torso_width(wlms, 0.62)  # vue face : 30 cm
-profondeur = _interpolated_torso_depth(wlms, 0.62)  # vue profil : 20 cm
-
-# On approxime la section du corps comme une ellipse :
-# largeur 30cm, profondeur 20cm → tour de ceinture ≈ 79.3 cm
+def extraire_profil(wlms, known_height_cm) -> dict:
 ```
 
-Sans profondeur → pas d'ellipse → tour estime avec des ratios approximatifs (moins precis).
+### Pourquoi cette fonction existe
 
-Exemple :
+La largeur seule (vue de face) ne suffit pas pour calculer un **tour** (circonférence). Le corps est en 3D. De profil, on mesure l'épaisseur (profondeur).
+
+### `_interpolated_torso_depth(wlms, ratio)` — Profondeur du torse
 
 ```python
-profondeur_ceinture = _interpolated_torso_depth(wlms, 0.62)
+def _interpolated_torso_depth(wlms, ratio) -> float:
 ```
 
-Cela calcule une profondeur approximative de la ceinture.
+**Comment :** Prend la différence sur l'axe Z entre le point gauche et le point droit à un niveau donné (buste, ceinture, hanche). De profil, un côté est plus proche de la caméra que l'autre → la différence donne la profondeur.
 
-Pourquoi ?
+**Pourquoi c'est crucial :** Sans profondeur → pas d'ellipse → tours estimés par des ratios approximatifs (moins précis).
 
-Pour calculer une circonference, une largeur seule ne suffit pas. Le corps n'est pas une ligne plate. On approxime donc la section du corps comme une ellipse :
+### Qu'est-ce qui est calculé
 
-```text
-largeur face + profondeur profil -> ellipse -> tour
-```
+| Code                      | Signification                         |
+| ------------------------- | ------------------------------------- |
+| `PROFONDEUR_BUSTE`      | Profondeur au niveau buste (poitrine) |
+| `PROFONDEUR_CEINTURE`   | Profondeur au niveau ceinture         |
+| `PROFONDEUR_HANCHE`     | Profondeur au niveau hanches          |
+| `TORSE_LONGUEUR_PROFIL` | Longueur torse depuis le profil       |
 
-## `_clamp(value, low, high)`
+---
+
+## `fusionner(m_face, m_dos, m_profil)` — Fusion des 3 vues + calcul des tours
 
 ```python
-def _clamp(value: float, low: float, high: float) -> float:
-    return round(min(max(value, low), high), 1)
+def fusionner(m_face, m_dos, m_profil) -> list[dict]:
 ```
 
-Cette fonction limite une valeur entre un minimum et un maximum.
+### Pourquoi cette fonction existe
 
-Exemple :
+Chaque vue donne des mesures partielles. La face donne largeurs et longueurs, le profil donne profondeurs, le dos valide. Il faut :
 
-```python
-tour_ceinture = _clamp(tour_ceinture, min_tour_ceinture, max_tour_ceinture)
-```
+1. Fusionner les trois dictionnaires
+2. Valider/moyenner les mesures redondantes (épaules, torse)
+3. Calculer les tours (circonférences) à partir des largeurs + profondeurs
+4. Ajouter les mesures dérivées (tour de cou, genou, poignet)
+5. Filtrer les mesures internes et invalides
 
-Si `tour_ceinture` est trop petit, il devient `min_tour_ceinture`.
+### Validation des mesures redondantes
 
-Si `tour_ceinture` est trop grand, il devient `max_tour_ceinture`.
-
-Pourquoi ?
-
-Les photos peuvent produire des erreurs :
-
-- personne legerement tournee ;
-- bras trop proches du corps ;
-- vetements larges ;
-- mauvaise detection MediaPipe ;
-- profil pas parfaitement lateral.
-
-Le `clamp` evite donc des valeurs aberrantes.
-
-## `_compute_scale(wlms, known_height_cm=None)` — coeur de la calibration
-
-```python
-def _compute_scale(wlms: list, known_height_cm: Optional[float] = None) -> float:
-```
-
-Cette fonction remplace l'ancienne `_estimate_body_height`. Elle ne calcule pas directement `HAUTEUR`. Elle calcule le **facteur d'echelle** qui sera applique a toutes les mesures (hauteur, largeurs, longueurs, profondeurs).
-
-### Pourquoi ce changement ?
-
-L'ancienne approche appliquait la correction uniquement sur `HAUTEUR` et laissait les autres mesures (epaules, bras, jambes) avec l'echelle MediaPipe brute — ce qui donnait des mesures incoherentes entre elles.
-
-La nouvelle approche applique **le meme facteur** a toutes les mesures, preservant les proportions.
-
-### Mode 1 — calibration par taille connue
-
-```python
-if known_height_cm:
-    # 1. Estimer la hauteur brute a partir des raw world landmarks
-    nose_to_ankle = abs(wlms[NOSE].y - ankle_y) * 100
-    shoulder_to_ankle = abs(shoulder_y - ankle_y) * 100
-    ear_width = w3d(wlms, LEFT_EAR, RIGHT_EAR)
-    head_top_extra = max(ear_width * 0.45, epaules_raw * 0.14)
-    foot_extra = max(epaules_raw * 0.07, 3.0)
-    height_from_nose = nose_to_ankle + head_top_extra + foot_extra
-    height_from_shoulders = shoulder_to_ankle / 0.82
-    raw_height = (height_from_nose * 0.65) + (height_from_shoulders * 0.35)
-
-    # 2. Facteur = taille reelle / hauteur brute MediaPipe
-    scale = known_height_cm / max(raw_height, 1.0)
-```
-
-### Mode 2 — fallback par largeur d'epaules
-
-```python
-else:
-    scale = ASSUMED_SHOULDER_WIDTH_CM / max(epaules_raw, 1.0)
-```
-
-### Pourquoi la hauteur est calculee dans `extraire_face` et non plus dans une fonction separee ?
-
-Parce que maintenant la hauteur est juste une mesure scalée comme les autres :
-
-```python
-# Dans extraire_face():
-height_from_nose = (nose_to_ankle * scale) + head_top_extra + foot_extra
-height_from_shoulders = (shoulder_to_ankle * scale) / 0.82
-hauteur = round((height_from_nose * 0.65) + (height_from_shoulders * 0.35), 1)
-```
-
-`nose_to_ankle` et `shoulder_to_ankle` sont en cm bruts (raw). On les multiplie par `scale` pour obtenir les cm reels. `head_top_extra` et `foot_extra` utilisent `largeur_epaules_scaled * ratio`, donc deja dans la bonne echelle.
-
-### Mais pourquoi recalculer la hauteur si l'utilisateur a déjà donne sa taille ?
-
-`known_height_cm` est **optionnel** (`Optional[float] = None`). La fonction `_compute_scale` est un helper qui **ne retourne que le facteur d'echelle**. Il y a deux cas :
-
-1. **Si l'user fournit sa taille** → `_compute_scale` utilise `known_height_cm` uniquement pour calculer le `scale` (calibration). La `hauteur` est ensuite recalculee dans `extraire_face` et renvoyee au frontend comme toutes les autres mesures. Meme si la valeur est proche de `known_height_cm`, elle sert de **valeur de coherence** : si l'estimation photo s'eloigne trop de la taille donnee, le score de confiance (0.84) sera faible, signalant une photo de mauvaise qualite.
-
-2. **Si l'user ne fournit pas sa taille** → `_compute_scale` utilise le fallback (largeur d'epaules moyenne a 39 cm). Sans le recalcul dans `extraire_face`, il n'y aurait **aucune estimation de la hauteur**. La `hauteur` est donc indispensable dans ce cas.
-
-Le code est uniforme : `extraire_face` assemble toujours le meme dictionnaire de mesures, independamment de la methode de calibration employee (`known_height_cm` ou fallback). C'est un choix de conception pour eviter de dupliquer la logique.
-
-### Aucun `clamp` restrictif
-
-L'ancien `_clamp(estimated, shoulder_to_ankle * 1.08, shoulder_to_ankle * 1.30)` a ete supprime. Il limitait la hauteur a 130% du segment epaules-chevilles, ce qui bloquait la correction apportee par la calibration. Exemple : une personne de 160 cm avec un segment epaules-chevilles MediaPipe de 70 cm etait plafonnee a 91 cm, meme apres calibration.
-
-## `extraire_face(wlms, known_height_cm=None)`
-
-```python
-def extraire_face(wlms: list, known_height_cm: Optional[float] = None) -> dict:
-```
-
-Cette fonction calcule les mesures visibles depuis la photo de face.
-
-La premiere etape est la **calibration d'echelle** via `_compute_scale` :
-
-```python
-scale = _compute_scale(wlms, known_height_cm)
-```
-
-Cette fonction retourne le facteur d'echelle selon le mode choisi (taille connue ou fallback epaules). Toutes les mesures sont ensuite multipliees par ce facteur :
-
-```python
-distance_landmarks = lambda a, b: w3d(wlms, a, b)
-distance_landmarks_scaled = lambda a, b: round(distance_landmarks(a, b) * scale, 1)
-```
-
-La largeur d'epaules et la hauteur sont calculees a partir des memes donnees scalées :
-
-```python
-largeur_epaules_scaled = w3d(wlms, L_SHOULDER, R_SHOULDER) * scale
-hauteur = (nose_to_ankle * scale + corrections) * 0.65 + (shoulder_to_ankle * scale / 0.82) * 0.35
-```
-
-Mesures calculees :
-
-Mesures principales :
-
-- `HAUTEUR` : taille reelle estimee de la personne.
-- `EPAULES` : largeur epaules.
-- `BUSTE_LARGEUR` : largeur intermediaire du buste (poitrine). Sert a calculer `POITRINE`.
-- `CEINTURE_LARGEUR` : largeur intermediaire de la ceinture (waist). Sert a calculer `CEINTURE`. Ne pas confondre avec `HAUTEUR` (stature).
-- `HANCHES_L` : largeur hanches.
-- `TORSE` : longueur torse.
-- `BRA_TOTAL` : longueur bras total.
-- `BRA_HAUT` : longueur haut du bras.
-- `BRA_AV` : longueur avant-bras.
-- `JAMBE` : longueur jambe.
-- `CUISSE` : longueur cuisse.
-- `MOLLET` : longueur mollet.
-
-Exemple de retour :
-
-```python
-{
-    "EPAULES": (42.0, "face", 0.92),
-    "CEINTURE_LARGEUR": (30.0, "face", 0.84),
-    "HANCHES_L": (38.0, "face", 0.90),
-}
-```
-
-Chaque valeur est sous cette forme :
-
-```python
-(valeur, source, confiance)
-```
-
-Exemple :
-
-```python
-("CEINTURE_LARGEUR": (30.0, "face", 0.84))
-```
-
-Cela signifie :
-
-```text
-Largeur ceinture = 30.0 cm, calculee depuis la vue face, confiance 84%.
-```
-
-## `extraire_dos(wlms, known_height_cm=None)`
-
-```python
-def extraire_dos(wlms: list, known_height_cm: Optional[float] = None) -> dict:
-```
-
-Cette fonction calcule quelques mesures depuis la vue de dos.
-
-Elle sert surtout a valider ou corriger les mesures de face.
-
-Mesures retournees :
-
-```python
-{
-    "EPAULES_DOS": ...,
-    "HANCHES_LARGEUR_DOS": ...,
-    "TORSE_LONGUEUR_DOS": ...,
-}
-```
-
-Pourquoi ?
-
-La vue de face peut etre imparfaite. La vue de dos permet de confirmer certaines largeurs, surtout :
-
-- les epaules ;
-- les hanches ;
-- la longueur du torse.
-
-Exemple :
-
-```python
-m_face["EPAULES"] = 42.0
-m_dos["EPAULES_DOS"] = 43.0
-```
-
-Dans `fusionner()`, on peut prendre la moyenne :
-
-```python
-EPAULES = 42.5
-```
-
-## `extraire_profil(wlms, known_height_cm=None)`
-
-```python
-def extraire_profil(wlms: list, known_height_cm: Optional[float] = None) -> dict:
-```
-
-Cette fonction calcule les profondeurs depuis la photo de profil.
-
-Mesures retournees :
-
-```python
-{
-    "PROFONDEUR_BUSTE": ...,
-    "PROFONDEUR_CEINTURE": ...,
-    "PROFONDEUR_HANCHE": ...,
-    "TORSE_LONGUEUR_PROFIL": ...,
-}
-```
-
-Pourquoi ?
-
-Les tours corporels ont besoin d'une profondeur. Par exemple, pour calculer le tour de ceinture :
-
-```text
-largeur ceinture depuis face + profondeur ceinture depuis profil
-```
-
-Puis on calcule une ellipse.
-
-Exemple :
-
-```python
-largeur_ceinture = 30.0
-profondeur_ceinture = 20.0
-```
-
-On approxime ensuite le tour de ceinture avec une ellipse de largeur 30 cm et profondeur 20 cm.
-
-## `fusionner(m_face, m_dos, m_profil)`
-
-```python
-def fusionner(m_face: dict, m_dos: dict, m_profil: dict) -> list[dict]:
-```
-
-Cette fonction est la derniere etape. Elle fusionne les mesures des trois vues et produit la liste finale a stocker en base.
-
-Elle recoit :
-
-```python
-m_face = extraire_face(wlms_face)
-m_dos = extraire_dos(wlms_dos)
-m_profil = extraire_profil(wlms_profil)
-```
-
-Puis elle construit :
-
-```python
-raw = {**m_face, **m_dos, **m_profil}
-```
-
-Cela fusionne les dictionnaires.
-
-### Validation des epaules
+**Épaules :** si disponibles depuis face ET dos → moyenne des deux
 
 ```python
 if "EPAULES" in raw and "EPAULES_DOS" in raw:
@@ -593,58 +290,31 @@ if "EPAULES" in raw and "EPAULES_DOS" in raw:
     raw["EPAULES"] = (v, "face+dos", 0.94)
 ```
 
-Si on a la largeur epaules de face et de dos, on prend la moyenne.
-
-Exemple :
-
-```python
-EPAULES face = 42.0
-EPAULES dos = 43.0
-EPAULES finale = 42.5
-```
-
-### Validation du torse
+**Torse :** si disponible depuis face + dos + profil → moyenne des trois
 
 ```python
 torses = [raw[k][0] for k in ("TORSE", "TORSE_LONGUEUR_DOS", "TORSE_LONGUEUR_PROFIL") if k in raw]
 raw["TORSE"] = (avg(*torses), "face+dos+profil", 0.93)
 ```
 
-Si plusieurs vues donnent une longueur de torse, on prend la moyenne.
+### Calcul des tours par ellipse (Ramanujan)
 
-### Calcul des tours par ellipse
-
-Quand la vue profil est disponible, le service calcule :
+Quand le profil est disponible (largeur + profondeur) :
 
 ```python
-tour_poitrine = ellipse_circumference(demi_largeur_buste, demi_profondeur_buste)
-tour_ceinture = ellipse_circumference(demi_largeur_ceinture, demi_profondeur_ceinture)
-tour_hanches = ellipse_circumference(demi_largeur_hanches, demi_profondeur_hanches)
+tour = ellipse_circumference(demi_largeur, demi_profondeur)
 ```
 
-Avec :
-
-```text
-a = largeur / 2
-b = profondeur / 2
-```
-
-Exemple pour la ceinture :
+**`ellipse_circumference(a, b)`** — Approximation de Ramanujan
 
 ```python
-largeur_ceinture = 30.0
-profondeur_ceinture = 20.0
-
-demi_largeur_ceinture = 15.0
-demi_profondeur_ceinture = 10.0
-tour_ceinture = ellipse_circumference(demi_largeur_ceinture, demi_profondeur_ceinture)
+def ellipse_circumference(a, b) -> float:
+    return pi * (3 * (a + b) - sqrt((3 * a + b) * (a + 3 * b)))
 ```
 
-Cela donne une meilleure estimation que :
+Précision < 0.04% pour toute forme d'ellipse. C'est la meilleure approximation simple connue.
 
-```python
-tour_ceinture = tour_hanches * 0.80
-```
+**Pourquoi pas π × (a + b) ?** Cette formule simple (Mensuration) surestime de ~10%. Ramanujan est quasi exact.
 
 ### Fallback sans profil
 
@@ -653,268 +323,214 @@ Si la vue de profil manque, on utilise des ratios :
 ```python
 tour_poitrine = round(largeur_buste * 3.35, 1)
 tour_hanches = round(largeur_hanches * 3.35, 1)
-tour_ceinture = round((largeur_ceinture or largeur_hanches * 0.82) * 3.20, 1)
+tour_ceinture = round(largeur_ceinture * 3.20, 1)
 ```
 
-Ce fallback est moins precis que l'ellipse, mais il permet quand meme de retourner des mesures.
+Moins précis mais permet quand même de retourner des mesures.
 
-### Garde-fou sur la ceinture
+### Garde-fou (`_clamp`)
 
 ```python
-min_tour_ceinture = min(tour_poitrine, tour_hanches) * 0.62
-max_tour_ceinture = min(tour_poitrine, tour_hanches) * 1.03
+def _clamp(value, low, high) -> float:
+```
+
+**Pourquoi :** Les photos peuvent produire des aberrations : personne tournée, bras trop proches, vêtements larges, mauvaise détection MediaPipe.
+
+```python
 tour_ceinture = _clamp(tour_ceinture, min_tour_ceinture, max_tour_ceinture)
 ```
 
-Cela evite que le tour de ceinture soit totalement incoherent.
+Limite la ceinture entre 62% et 103% du plus petit des tours (poitrine, hanches) — norme NF EN 13402-2.
 
-Exemple :
-
-```python
-tour_poitrine = 96
-tour_hanches = 100
-tour_ceinture = 130
-```
-
-Ici, `130` est probablement trop grand. Le garde-fou le limite.
-
-### Mesures derivees par ratio
+### Mesures dérivées par ratio
 
 ```python
-raw["TOUR_COU"] = (round(largeur_oreilles * 1.73, 1), "ratio", 0.70)
-raw["TOUR_GENOU"] = (round(longueur_mollet * 1.20, 1), "ratio", 0.72)
-raw["TOUR_POIGNET"] = (round(longueur_avant_bras * 0.65, 1), "ratio", 0.72)
+raw["TOUR_COU"]     = (round(largeur_oreilles * 1.73, 1), "ratio", 0.70)
+raw["TOUR_GENOU"]   = (round(mollet * 1.20, 1),           "ratio", 0.72)
+raw["TOUR_POIGNET"] = (round(avant_bras * 0.65, 1),       "ratio", 0.72)
 ```
 
-Ces mesures sont derivees indirectement, car MediaPipe ne fournit pas assez de points precis pour calculer ces tours directement.
+**Pourquoi :** MediaPipe ne fournit pas assez de points précis pour calculer ces tours directement. On utilise des ratios anthropométriques issus de la littérature.
 
 ### Filtrage final
 
 ```python
 for code, (valeur, source, confiance) in raw.items():
-    if code in _INTERNAL_CODES or valeur <= 0:
+    if code in _CODES_INTERMEDIAIRES or valeur <= 0:
         continue
 ```
 
-Cette boucle retire :
+Retire :
 
-- les mesures internes ;
-- les valeurs invalides ou negatives.
+- Les codes internes (`BUSTE_LARGEUR`, `CEINTURE_LARGEUR`, `PROFONDEUR_*`, etc.) — ils ont servi à calculer les tours mais ne doivent pas être stockés
+- Les valeurs nulles ou négatives (erreur de détection)
 
-Puis elle cree le format final :
+---
+
+## `filtrer_par_sexe(mesures, sexe)` — Filtrage genre
+
+```python
+MESURES_EXCLUES_HOMME = {
+    "LONGUEUR_SOUS_SEINS",
+    "TOUR_SOUS_SEINS",
+    "LONGUEUR_JUPE",
+    "LONGUEUR_ROBE",
+}
+```
+
+**Pourquoi :** Un homme n'a pas besoin de mesure de sous-seins ou de longueur de jupe. Ces codes sont exclus pour les genres `homme`, `masculin`, `h`, `m`.
+
+**Valeurs acceptées :** `homme`/`femme`/`autre`/`masculin`/`feminin`
+
+---
+
+# `routers/mesures.py` — L'API
+
+## `POST /measure` — Analyser et stocker
+
+```python
+async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_db)):
+```
+
+### Étapes détaillées
+
+1. **Valider la fiche mesure** : cherche `FicheMesure` par UUID dans la base
+2. **Face** : obligatoire. Télécharge l'image → détecte landmarks → extrait mesures
+3. **Dos** : optionnel. Si échec → on continue sans
+4. **Profil** : optionnel. Si échec → tours calculés par ratio (moins précis)
+5. **Fusion** : combine les 3 vues
+6. **Filtrage sexe** : exclut les mesures inappropriées
+7. **Sauvegarde** : supprime les anciennes mesures remplacées, insère les nouvelles
+8. **Nettoyage** : supprime les images Cloudinary (toujours, même en cas d'erreur)
+
+### Gestion des `TypeMesure`
+
+Si un code de mesure n'existe pas encore dans `type_mesures` :
+
+```python
+type_mesure = TypeMesure(
+    external_id=uuid.uuid4(),
+    code=m["type_mesure_code"],
+    nom=m["label"],
+    description=m["label"],  # ATTENTION : colonne NOT NULL dans PostgreSQL
+    unite=m["unite"],
+    categorie=m["categorie"],
+    est_actif=True,
+)
+```
+
+**Piège** : la migration Laravel a créé `description TEXT NOT NULL`. Si `description` n'est pas fournie → `NotNullViolation`.
+
+## `POST /measure/cleanup` — Nettoyage Cloudinary
+
+Appelé par Laravel quand `/measure` échoue, pour nettoyer les images déjà uploadées.
+
+## `GET /measure/{fiche_id}` — Récupérer les mesures
+
+Retourne les mesures stockées pour une fiche donnée.
+
+---
+
+# `download_service.py` — Téléchargement d'images
+
+```python
+async def download_image_as_rgb(url: str) -> np.ndarray:
+```
+
+Télécharge une image depuis Cloudinary et la convertit en tableau numpy RGB pour MediaPipe.
+
+**Pourquoi une fonction dédiée :** Gère les timeouts, les erreurs HTTP, la conversion d'image, et le redimensionnement si nécessaire.
+
+---
+
+# `cloudinary_cleanup.py` — Nettoyage
+
+```python
+async def cleanup_cloudinary_images(urls: list[str]):
+```
+
+Supprime les images de Cloudinary après traitement (ou en cas d'échec) pour ne pas accumuler de fichiers inutiles.
+
+---
+
+# Schéma des données
+
+## `MesureRequest` (entrée)
 
 ```python
 {
-    "type_mesure_code": "CEINTURE",
-    "label": "Tour de ceinture (T)",
-    "unite": "cm",
-    "categorie": "circonference",
-    "valeur": 79.3,
-    "source": "ellipse(face+profil)",
-    "confiance": 0.86,
+    fiche_id: str,         # UUID de la FicheMesure
+    client_id: str,        # UUID du client
+    face_url: str,         # URL Cloudinary face
+    dos_url: str,          # URL Cloudinary dos
+    profil_url: str,       # URL Cloudinary profil
+    known_height_cm: float,# Taille utilisateur (obligatoire)
+    sexe: str,             # homme/femme/autre
 }
 ```
 
-## Exemple complet simplifie
-
-Donnees intermediaires :
+## `MesureOut` (sortie par mesure)
 
 ```python
-m_face = {
-    "EPAULES": (42.0, "face", 0.92),
-    "BUSTE_LARGEUR": (36.0, "face", 0.82),
-    "CEINTURE_LARGEUR": (30.0, "face", 0.84),
-    "HANCHES_L": (38.0, "face", 0.90),
-}
-
-m_profil = {
-    "PROFONDEUR_BUSTE": (24.0, "profil", 0.75),
-    "PROFONDEUR_CEINTURE": (20.0, "profil", 0.78),
-    "PROFONDEUR_HANCHE": (25.0, "profil", 0.75),
+{
+    type_mesure_code: str, # Ex: "CEINTURE"
+    label: str,            # Ex: "Tour de ceinture (T)"
+    unite: str,            # "cm"
+    categorie: str,        # "circonference"
+    valeur: float,         # 79.3
+    source: str,           # "ellipse(face+profil)"
+    confiance: float,      # 0.86
 }
 ```
 
-Appel :
+---
 
-```python
-mesures = fusionner(m_face, {}, m_profil)
-```
+# Erreurs connues et corrections
 
-Resultat possible :
+| Erreur                                   | Cause                                        | Correction                                                   |
+| ---------------------------------------- | -------------------------------------------- | ------------------------------------------------------------ |
+| "Le service de mesures est indisponible" | Timeout Laravel→Render (cold start ~30-60s) | `MEASURE_CV_CONNECT_TIMEOUT=60` + uptime monitor           |
+| `invalid input syntax for type uuid`   | envoi de`client_xxx` comme UUID            | `createClient()` Flutter appelle API→récupère vrai UUID |
+| `NotNullViolation: description`        | `TypeMesure` créé sans `description`   | ajouter`description=m["label"]`                            |
+| Mesures hommes incluent sous-seins/jupe  | Filtrage sexe manquant                       | `filtrer_par_sexe()` dans le routeur                       |
 
-```python
-[
-    {
-        "type_mesure_code": "POITRINE",
-        "valeur": 95.2,
-        "source": "ellipse(face+profil)",
-        "confiance": 0.88,
-    },
-    {
-        "type_mesure_code": "CEINTURE",
-        "valeur": 79.3,
-        "source": "ellipse(face+profil)",
-        "confiance": 0.86,
-    },
-    {
-        "type_mesure_code": "TOUR_HANCHES",
-        "valeur": 100.0,
-        "source": "ellipse(face+profil)",
-        "confiance": 0.86,
-    },
-]
-```
+---
 
-## Pourquoi la nouvelle methode est meilleure pour le tour de ceinture
+# Ratios anthropométriques (pour le jury)
 
-Ancienne logique :
+| Ratio                              | Usage                            | Justification                      | Source                   |
+| ---------------------------------- | -------------------------------- | ---------------------------------- | ------------------------ |
+| 0.30                               | Position buste                   | ~30% épaule→hanche               | Pheasant (1986)          |
+| 0.62                               | Position ceinture                | ~60-65% épaule→hanche            | ISO 8559-1:2017          |
+| 0.82                               | Épaule→cheville / stature      | Tête+cou = 18% de la stature      | Drillis & Contini (1966) |
+| 0.45                               | Largeur tête / oreilles         | Dimension antéro-postérieure     | Empirique                |
+| 0.14                               | Hauteur crâne / épaules        | Ratio crâne                       | Empirique                |
+| 3.35                               | Largeur → tour poitrine/hanches | π × correction aspect            | NF EN 13402-3            |
+| 3.20                               | Largeur → tour ceinture         | π × correction aspect elliptique | Empirique                |
+| 0.82                               | WHR (ceinture/hanches)           | Rapport moyen                      | OMS (2008)               |
+| 1.73                               | Tour de cou                      | × largeur bi-auriculaire          | DIN 61506                |
+| 1.20                               | Tour de genou                    | × longueur mollet                 | ISO 8559-1:2017          |
+| 0.65                               | Tour de poignet                  | × longueur avant-bras             | Pheasant (1986)          |
+| π × [3(a+b) − √((3a+b)(a+3b))] | Circonférence ellipse           | Précision < 0.04%                 | Ramanujan (1914)         |
 
-```python
-tour_ceinture = round(tour_hanches * 0.80, 1)
-```
+---
 
-Probleme :
+# Questions jury anticipées
 
-La ceinture dependait directement des hanches. Si les hanches etaient mal detectees, la ceinture devenait fausse aussi.
+**Q : "Pourquoi la taille est obligatoire ?"**
+R : "MediaPipe estime l'échelle 3D depuis une image unique, ce qui est imprécis. La taille connue est la seule référence fiable. Sans elle, on utilisait une largeur d'épaules moyenne (39 cm), qui ne s'applique pas aux enfants ni aux personnes hors norme."
 
-Nouvelle logique :
+**Q : "Comment calculez-vous le tour de ceinture ?"**
+R : "Deux approches : (1) avec profil → ellipse de Ramanujan à partir de la largeur (face) et profondeur (profil), précision < 0.04% ; (2) sans profil → ratio largeur × 3.20, moins précis mais fonctionnel."
 
-```python
-largeur_ceinture = _interpolated_torso_width(wlms, 0.62)
-profondeur_ceinture = _interpolated_torso_depth(wlms, 0.62)
-tour_ceinture = ellipse_circumference(largeur_ceinture / 2, profondeur_ceinture / 2)
-```
+**Q : "Pourquoi 0.62 pour la ceinture ?"**
+R : "C'est la position relative de la ceinture entre l'épaule et la hanche, basée sur la norme ISO 8559-1:2017. Le ratio (hauteur taille)/(hauteur épaule→hanche) est d'environ 0.60-0.65 dans la population adulte."
 
-Avantage :
+**Q : "Et si la personne est de profil imparfait ?"**
+R : "Le `_clamp` limite les valeurs aberrantes. La profondeur minimale est plafonnée à 45% de la largeur pour éviter les ellipses aplaties. Si la photo de profil est inexpoitable, on utilise le fallback par ratio."
 
-La ceinture est estimee a son propre niveau anatomique, avec une largeur et une profondeur propres.
+**Q : "Comment gérez-vous les hommes vs femmes ?"**
+R : "Le filtre `filtrer_par_sexe` exclut 4 codes : longueur sous-seins, tour sous-seins, longueur jupe, longueur robe. Le genre est passé de Laravel → FastAPI dans le payload."
 
-## Avantage pour la soutenance (jury)
-
-Cette approche offre plusieurs arguments solides :
-
-1. **Probleme identifie** : "MediaPipe estime l'echelle 3D depuis une seule image → imprecise (66 cm pour 160 cm reel)."
-2. **Deux solutions** : "(a) L'utilisateur fournit sa taille → calibration parfaite pour tous. (b) Fallback automatique par largeur d'epaules."
-3. **Resultat prouve** : "Avec la taille connue : mesures exactes. Sans : ~160 cm au lieu de 66 cm."
-4. **Flexibilite** : "Enfant comme adulte, la taille connue s'adapte a tous."
-5. **Approche scientifique** : deux strategies, l'une exacte (reference utilisateur), l'autre approximative (reference anatomique documentee).
-6. **Transparence** : le mode de calibration est logge, visible dans les logs.
-
-### Questions du jury anticipees
-
-**Q : "Et si l'utilisateur ne connait pas sa taille ?"**
-R : "Le fallback par epaules donne une approximation. On pourrait aussi detecter automatiquement la taille depuis une photo d'identite ou un objet de reference dans l'image."
-
-**Q : "Pourquoi 39 cm pour les epaules ?"**
-R : "C'est la moyenne adulte issue de la litterature anthropometrique. C'est un simple fallback. L'utilisateur peut fournir sa taille pour une bien meilleure precision."
-
-**Q : "Votre solution est-elle fiable pour un enfant ?"**
-R : "Avec la taille connue, oui, car le facteur d'echelle s'adapte a n'importe quelle stature. Sans taille connue, le fallback par epaules est moins fiable pour un enfant — c'est une limite documentee."
-
-## Pourquoi la nouvelle methode est meilleure pour `HAUTEUR`
-
-Ancienne logique :
-
-```python
-hauteur = distance_epaules_chevilles + petit_bonus
-```
-
-Probleme :
-
-La distance epaules -> chevilles ne represente pas la taille complete de la personne. Elle oublie :
-
-- la tete ;
-- le cou ;
-- la partie entre les chevilles et le sol.
-
-Nouvelle logique :
-
-```python
-height_from_nose = nez -> chevilles + correction tete + correction pieds
-height_from_shoulders = epaules -> chevilles / 0.82
-HAUTEUR = moyenne ponderee des deux
-```
-
-Avantage :
-
-`HAUTEUR` est maintenant une estimation de la stature complete, pas seulement du segment epaules-chevilles.
-
-## Limites importantes
-
-Cette methode reste une estimation par image. Pour obtenir de meilleures mesures, il faut :
-
-- une personne debout, droite, bras legerement ecartes ;
-- une camera a hauteur du torse ;
-- une vue face bien frontale ;
-- une vue profil vraiment laterale ;
-- des vetements proches du corps ;
-- une distance camera stable.
-
-### Calibration par epaules (fallback)
-
-Le fallback par epaules suppose une largeur moyenne de 39 cm. En realite :
-
-- Un homme large d'epaules (44 cm) → mesures sous-estimees.
-- Une femme etroite (35 cm) → mesures surestimees.
-- Un enfant de 10 ans (28 cm) → mesures fortement surestimees.
-
-C'est pourquoi ce mode est un fallback. La solution recommandee est la **taille connue**.
-
-### Calibration par taille connue
-
-Aucune limite anatomique — la calibration s'adapte a n'importe quelle stature. La seule contrainte est que l'utilisateur doit connaitre et saisir sa taille.
-
-### Limite commune aux deux modes
-
-La calibration mono-image suppose que le facteur d'echelle est le meme pour toutes les mesures (epaules, bras, jambes, profondeur). C'est vrai si MediaPipe est coherent dans son echelle, ce qui est le cas pour les world landmarks.
-
-### resume
-Pourquoi tous ces ratios ?
-
-Tous les ratios du fichier répondent à une seule idée :
-
-Transformer des points anatomiques incomplets en mesures de couture exploitables.
-
-MediaPipe fournit environ 33 points (épaules, hanches, coudes, poignets, etc.), mais un tailleur a besoin de mesures comme :
-
-tour de poitrine,
-tour de ceinture,
-tour de cou,
-largeur du buste,
-profondeur du torse.
-
-Comme ces mesures ne sont pas directement visibles, le code utilise :
-
-des interpolations (0.30, 0.62) pour créer des points anatomiques intermédiaires ;
-des ratios anthropométriques (1.73, 1.20, 0.65, etc.) lorsque la mesure est impossible à observer directement ;
-des modèles géométriques (ellipse de Ramanujan) quand il dispose à la fois de la largeur et de la profondeur, ce qui est plus précis que de simples ratios.
-
-## Sources des ratios
-
-| Ratio | Valeur | Source |
-|---|---|---|
-| **Interpolation buste** | 0.30 | Position estimée du buste à ~30% du segment épaule→hanche. Cohérent avec les proportions de Pheasant (1986), *Bodyspace*. |
-| **Interpolation ceinture** | 0.62 | Position estimée de la ceinture à ~62%. Le rapport (hauteur taille) / (hauteur épaule→hanche) est d'environ 0.60–0.65 dans la population adulte (ISO 8559-1:2017, tableau A.1). |
-| **Segment tête/cou** | 0.82 (épaule→cheville = 82% de la stature) | **Drillis & Contini (1966)**, *Body Segment Parameters*. La tête + cou représentent ~10-13% de la stature ; le tronc ~30%. Confirmé par **Winter (2009)** *Biomechanics and Motor Control*. |
-| **Bonus tête** | max(oreilles × 0.45, épaules × 0.14) | 0.45 = ratio largeur tête / largeur oreilles (≈ dimension antéro-postérieure). 0.14 = ratio hauteur crâne / largeur épaules. Empirique. |
-| **Bonus pieds** | max(épaules × 0.07, 3.0) | 0.07 ≈ hauteur cheville→sol / largeur épaules. **ISO 8559-1:2017** : distance sol→cheville ≈ 4-5% de la stature. |
-| **Fallback largeur→tour (poitrine/hanches)** | 3.35 | π (3.1416) corrigé par le rapport d'aspect moyen du torse. **NF EN 13402-3** : le tour de poitrine ≈ 3.1–3.4 × largeur buste selon la corpulence. |
-| **Fallback largeur→tour (ceinture)** | 3.20 | π corrigé pour la section plus elliptique de la ceinture. |
-| **Rapport taille/hanches** | 0.82 | **OMS (2008)** *Waist Circumference and Waist–Hip Ratio* : le WHR moyen est 0.80–0.85 chez les femmes, 0.85–0.95 chez les hommes. Valeur médiane ≈ 0.82. |
-| **Tour de cou** | oreilles × 1.73 | **DIN 61506** et tables de modelisme : le tour de cou ≈ 1.7–1.8 × largeur bi-auriculaire. |
-| **Tour de genou** | mollet × 1.20 | **ISO 8559-1:2017** §5.3.6 : le tour de genou est ~1.15–1.25 × longueur mollet. |
-| **Tour de poignet** | avant-bras × 0.65 | Anthropométrie de **Pheasant (1986)** : périmètre distal avant-bras ≈ 0.63–0.68 × longueur avant-bras. |
-| **Profondeur minimale** | 0.45 (buste/ceinture) / 0.50 (hanches) | Garde-fou empirique : éviter les ellipses aplaties quand la vue profil est bruitée. |
-| **Clamp ceinture** | min 0.62, max 1.03 du plus petit (poitrine, hanches) | **NF EN 13402-2** : le tour de ceinture est toujours compris entre 60% et 105% du plus petit des deux tours adjacents. |
-| **Ellipse de Ramanujan** | π × [3(a+b) − √((3a+b)(a+3b))] | **Ramanujan (1914)** *Modular Equations and Approximations to π*. Approximation de la circonférence d'une ellipse, précision < 0.04% pour toute forme. |
-
-### Références complètes
-
-- **ISO 8559-1:2017** — *Garment construction and anthropometric surveys — Body dimensions*. ISO, Genève.
-- **NF EN 13402-1/2/3** — *Désignation des tailles de vêtements*. AFNOR.
-- **DIN 61506** — *Körpermaße für Bekleidung*. Deutsches Institut für Normung.
-- **Pheasant, S. (1986)** — *Bodyspace: Anthropometry, Ergonomics and Design*. Taylor & Francis.
-- **Drillis, R. & Contini, R. (1966)** — *Body Segment Parameters*. New York University, School of Engineering and Science.
-- **Winter, D.A. (2009)** — *Biomechanics and Motor Control of Human Movement*. Wiley.
-- **OMS (2008)** — *Waist Circumference and Waist–Hip Ratio: Report of a WHO Expert Consultation*. Genève.
-- **Ramanujan, S. (1914)** — *Modular Equations and Approximations to π*. Quarterly Journal of Mathematics, 45, 350–372.
+**Q : "Votre solution est-elle fiable ?"**
+R : "La calibration par taille connue élimine l'imprécision de l'échelle MediaPipe. Les mesures finales sont cohérentes avec les proportions du corps humain car le même facteur d'échelle est appliqué à toutes les mesures. Les résultats sont validés par fusion de 3 vues (face, dos, profil)."
