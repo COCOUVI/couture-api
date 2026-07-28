@@ -12,20 +12,20 @@ logger = logging.getLogger(__name__)
 
 TYPE_MESURE_META: dict[str, dict] = {
     "HAUTEUR"             : {"label": "Hauteur totale",                        "unite": "cm", "categorie": "longueur"},
-    "TORSE"               : {"label": "Longueur torse (épaule → hanche)",      "unite": "cm", "categorie": "longueur"},
-    "HAUT_SEIN"           : {"label": "Hauteur de sein (épaule → buste)",      "unite": "cm", "categorie": "longueur"},
-    "LONGUEUR_TAILLE"     : {"label": "Longueur taille (épaule → nombril)",    "unite": "cm", "categorie": "longueur"},
-    "LONGUEUR_CHEMISE"    : {"label": "Longueur chemise (nombril → hanche)",   "unite": "cm", "categorie": "longueur"},
-    "LONGUEUR_SOUS_SEINS" : {"label": "Longueur sous-poitrine (épaule → sous-sein)", "unite": "cm", "categorie": "longueur"},
-    "JAMBE"               : {"label": "Longueur pantalon (hanche → cheville)", "unite": "cm", "categorie": "longueur"},
-    "LONGUEUR_JUPE"       : {"label": "Longueur jupe longue (hanche → cheville)", "unite": "cm", "categorie": "longueur"},
-    "LONGUEUR_ROBE"       : {"label": "Longueur robe (épaule → cheville)",     "unite": "cm", "categorie": "longueur"},
-    "CUISSE"              : {"label": "Longueur cuisse (hanche → genou)",      "unite": "cm", "categorie": "longueur"},
-    "MOLLET"              : {"label": "Longueur mollet (genou → cheville)",    "unite": "cm", "categorie": "longueur"},
-    "HAUTEUR_GENOU"       : {"label": "Hauteur genou (sol → genou)",           "unite": "cm", "categorie": "longueur"},
-    "MANCHE_LONGUE"       : {"label": "Longueur manche longue (épaule → poignet)", "unite": "cm", "categorie": "longueur"},
-    "MANCHE_COURTE"       : {"label": "Longueur manche courte (épaule → coude)",   "unite": "cm", "categorie": "longueur"},
-    "BRA_AV"              : {"label": "Longueur avant-bras (coude → poignet)", "unite": "cm", "categorie": "longueur"},
+    "TORSE"               : {"label": "Longueur torse (épaule - hanche)",      "unite": "cm", "categorie": "longueur"},
+    "HAUT_SEIN"           : {"label": "Hauteur de sein (épaule - buste)",      "unite": "cm", "categorie": "longueur"},
+    "LONGUEUR_TAILLE"     : {"label": "Longueur taille (épaule - nombril)",    "unite": "cm", "categorie": "longueur"},
+    "LONGUEUR_CHEMISE"    : {"label": "Longueur chemise (nombril - hanche)",   "unite": "cm", "categorie": "longueur"},
+    "LONGUEUR_SOUS_SEINS" : {"label": "Longueur sous-poitrine (épaule - sous-sein)", "unite": "cm", "categorie": "longueur"},
+    "JAMBE"               : {"label": "Longueur pantalon (hanche - cheville)", "unite": "cm", "categorie": "longueur"},
+    "LONGUEUR_JUPE"       : {"label": "Longueur jupe longue (hanche - cheville)", "unite": "cm", "categorie": "longueur"},
+    "LONGUEUR_ROBE"       : {"label": "Longueur robe (épaule - cheville)",     "unite": "cm", "categorie": "longueur"},
+    "CUISSE"              : {"label": "Longueur cuisse (hanche - genou)",      "unite": "cm", "categorie": "longueur"},
+    "MOLLET"              : {"label": "Longueur mollet (genou - cheville)",    "unite": "cm", "categorie": "longueur"},
+    "HAUTEUR_GENOU"       : {"label": "Hauteur genou (sol - genou)",           "unite": "cm", "categorie": "longueur"},
+    "MANCHE_LONGUE"       : {"label": "Longueur manche longue (épaule - poignet)", "unite": "cm", "categorie": "longueur"},
+    "MANCHE_COURTE"       : {"label": "Longueur manche courte (épaule - coude)",   "unite": "cm", "categorie": "longueur"},
+    "BRA_AV"              : {"label": "Longueur avant-bras (coude - poignet)", "unite": "cm", "categorie": "longueur"},
     "EPAULES"             : {"label": "Largeur épaules",                       "unite": "cm", "categorie": "largeur"},
     "CARRURE_DEVANT"      : {"label": "Carrure devant (entre emmanchures)",    "unite": "cm", "categorie": "largeur"},
     "CARRURE_DOS"         : {"label": "Carrure dos (entre emmanchures)",       "unite": "cm", "categorie": "largeur"},
@@ -63,6 +63,7 @@ MESURES_EXCLUES_HOMME: set[str] = {
 
 
 def _point_interpole(a, b, ratio: float) -> tuple[float, float, float]:
+    """Retourne un point 3D interpolé entre deux landmarks."""
     return (
         a.x + (b.x - a.x) * ratio,
         a.y + (b.y - a.y) * ratio,
@@ -71,6 +72,7 @@ def _point_interpole(a, b, ratio: float) -> tuple[float, float, float]:
 
 
 def _distance_entre_points_cm(pa: tuple[float, float, float], pb: tuple[float, float, float]) -> float:
+    """Calcule la distance 3D entre deux points en centimètres."""
     return round(
         ((pa[0] - pb[0]) ** 2 + (pa[1] - pb[1]) ** 2 + (pa[2] - pb[2]) ** 2) ** 0.5 * 100,
         1,
@@ -78,31 +80,35 @@ def _distance_entre_points_cm(pa: tuple[float, float, float], pb: tuple[float, f
 
 
 def _largeur_torse_interpolee(wlms: list, ratio: float) -> float:
+    """Mesure la largeur du torse à un niveau donné entre épaule et hanche."""
     g = _point_interpole(wlms[L_SHOULDER], wlms[L_HIP], ratio)
     d = _point_interpole(wlms[R_SHOULDER], wlms[R_HIP], ratio)
     return _distance_entre_points_cm(g, d)
 
 
 def _profondeur_torse_interpolee(wlms: list, ratio: float) -> float:
+    """Mesure la profondeur du torse à un niveau donné entre épaule et hanche."""
     g = _point_interpole(wlms[L_SHOULDER], wlms[L_HIP], ratio)
     d = _point_interpole(wlms[R_SHOULDER], wlms[R_HIP], ratio)
     return round(abs(g[2] - d[2]) * 100, 1)
 
 
 def _clamp(val: float, low: float, high: float) -> float:
+    """Limite une valeur dans un intervalle fermé."""
     return round(min(max(val, low), high), 1)
 
 
 def _compute_scale(wlms: list, taille_connue_cm: float) -> float:
+    """Estime le facteur de conversion entre les landmarks et les centimètres."""
     largeur_epaules_brute = w3d(wlms, L_SHOULDER, R_SHOULDER)
     y_ep_moy = (wlms[L_SHOULDER].y + wlms[R_SHOULDER].y) / 2
     y_ch_moy = (wlms[L_ANKLE].y + wlms[R_ANKLE].y) / 2
     dist_nez_cheville = abs(wlms[NOSE].y - y_ch_moy) * 100
     dist_ep_cheville = abs(y_ep_moy - y_ch_moy) * 100
     largeur_bi_auric = w3d(wlms, LEFT_EAR, RIGHT_EAR)
-    bonus_crane = max(largeur_bi_auric * 0.45, largeur_epaules_brute * 0.14)
-    bonus_pied = max(largeur_epaules_brute * 0.07, 3.0)
-    h_nez = dist_nez_cheville + bonus_crane + bonus_pied
+    extension_cranienne = max(largeur_bi_auric * 0.45, largeur_epaules_brute * 0.14)
+    hauteur_semelle = max(largeur_epaules_brute * 0.07, 3.0)
+    h_nez = dist_nez_cheville + extension_cranienne + hauteur_semelle
     h_ep = dist_ep_cheville / 0.82
     hauteur_brute = (h_nez * 0.65) + (h_ep * 0.35)
     scale = taille_connue_cm / max(hauteur_brute, 1.0)
@@ -111,12 +117,15 @@ def _compute_scale(wlms: list, taille_connue_cm: float) -> float:
 
 
 def extraire_face(wlms: list, known_height_cm: float) -> dict:
+    """Extrait les mesures de la vue de face."""
     scale = _compute_scale(wlms, known_height_cm)
 
     def s(ia: int, ib: int) -> float:
+        """Convertit une distance MediaPipe en centimètres."""
         return round(w3d(wlms, ia, ib) * scale, 1)
 
     def avg_bilat(iga, igb, ida, idb) -> float:
+        """Moyenne les mesures gauche et droite d'une même zone."""
         return avg(s(iga, igb), s(ida, idb))
 
     largeur_epaules = s(L_SHOULDER, R_SHOULDER)
@@ -166,12 +175,15 @@ def extraire_face(wlms: list, known_height_cm: float) -> dict:
 
 
 def extraire_dos(wlms: list, known_height_cm: float) -> dict:
+    """Extrait les mesures de la vue de dos."""
     scale = _compute_scale(wlms, known_height_cm)
 
     def s(ia: int, ib: int) -> float:
+        """Convertit une distance MediaPipe en centimètres."""
         return round(w3d(wlms, ia, ib) * scale, 1)
 
     def avg_bilat(iga, igb, ida, idb) -> float:
+        """Moyenne les mesures gauche et droite d'une même zone."""
         return avg(s(iga, igb), s(ida, idb))
 
     carrure_dos = round(_largeur_torse_interpolee(wlms, 0.12) * scale, 1)
@@ -185,6 +197,7 @@ def extraire_dos(wlms: list, known_height_cm: float) -> dict:
 
 
 def extraire_profil(wlms: list, known_height_cm: float) -> dict:
+    """Extrait les mesures de la vue de profil."""
     scale = _compute_scale(wlms, known_height_cm)
     profond_buste = abs(wlms[L_SHOULDER].z - wlms[R_SHOULDER].z) * 100
     profond_sous_seins = _profondeur_torse_interpolee(wlms, 0.20)
@@ -202,6 +215,7 @@ def extraire_profil(wlms: list, known_height_cm: float) -> dict:
 
 
 def filtrer_par_sexe(mesures: list[dict], sexe: str) -> list[dict]:
+    """Retire les mesures non pertinentes pour un profil homme."""
     norm = sexe.strip().lower()
     if norm in ("homme", "masculin", "h", "M"):
         return [m for m in mesures if m["type_mesure_code"] not in MESURES_EXCLUES_HOMME]
@@ -209,6 +223,7 @@ def filtrer_par_sexe(mesures: list[dict], sexe: str) -> list[dict]:
 
 
 def fusionner(m_face: dict, m_dos: dict, m_profil: dict) -> list[dict]:
+    """Fusionne les mesures des trois vues et produit les mesures finales."""
     raw: dict = {**m_face, **m_dos, **m_profil}
 
     if "EPAULES" in raw and "EPAULES_DOS" in raw:

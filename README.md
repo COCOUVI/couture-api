@@ -1,221 +1,198 @@
-# Couture API — Microservice FastAPI
+# Couture API
 
-Microservice Python pour la **prise de mesures corporelles automatique** par analyse d'images via **MediaPipe Pose Landmarker**.
+Couture API est un microservice FastAPI chargé de transformer trois photos du corps humain en mesures utilisables pour la couture sur mesure. Il récupère les images depuis Cloudinary, détecte la pose avec MediaPipe, calcule les mesures, puis enregistre le résultat dans PostgreSQL.
 
-Le service s'intègre dans l'architecture suivante :
+## Rôle dans l’architecture
 
+Le service s’insère dans la chaîne suivante:
+
+```text
+Flutter -> Cloudinary -> Laravel -> FastAPI -> Supabase
 ```
-Flutter (scan 3 photos) → Cloudinary → Laravel → FastAPI (ce service) → Supabase
-```
 
----
+Son rôle est précis: recevoir une fiche de mesure déjà créée, analyser les vues face, dos et profil, produire les mesures normalisées, puis retourner un résultat exploitable par Laravel et Flutter.
 
-## Stack
+## Ce que fait le service
 
-- **FastAPI** — serveur API async (Python 3.10+)
-- **MediaPipe** — détection de pose (world landmarks 3D)
-- **SQLAlchemy 2.0** — ORM PostgreSQL
-- **httpx** — téléchargement des images Cloudinary
-- **PostgreSQL (Supabase)** — base de données partagée avec Laravel
+L’API télécharge les images, corrige leur orientation si nécessaire, détecte les landmarks 3D du corps, calcule des longueurs et des circonférences, enregistre les mesures en base, puis supprime les images Cloudinary lorsque la configuration le permet.
 
----
+Les mesures produites servent à alimenter la fabrication de vêtements sur mesure, avec des valeurs annotées par leur source et leur niveau de confiance.
 
-## Fonctionnement général
+## Stack technique
 
-1. **Flutter** prend 3 photos (face, dos, profil) et les upload sur **Cloudinary** (unsigned preset)
-2. **Laravel** crée une `FicheMesure` en DB et appelle ce service via `POST /measure`
-3. **FastAPI** télécharge chaque image, exécute MediaPipe pour extraire les landmarks 3D, calcule les mesures (hauteur, largeurs, circonférences) et les stocke dans la table `mesures`
-4. **Après succès**, les images sont supprimées de Cloudinary (cleanup automatique)
-5. **Laravel** reçoit la confirmation et retourne le résultat à Flutter
+- FastAPI pour l’API HTTP
+- MediaPipe pour la détection de pose
+- SQLAlchemy 2.0 pour la persistance PostgreSQL
+- httpx pour le téléchargement distant des images
+- Pillow et NumPy pour le prétraitement image
+- Supabase comme base partagée avec Laravel
 
----
-
-## Installation en local
+## Installation locale
 
 ### Prérequis
 
-- Python 3.10+
+- Python 3.10 ou plus
 - pip
+- accès à une base PostgreSQL compatible Supabase
 
-### Mise en place
+### Installation
 
 ```bash
 cd couture-api
 python -m venv venv
-source venv/bin/activate          # Linux / Mac
-# venv\Scripts\activate           # Windows
+venv\Scripts\activate
+pip install -r requirements.txt
+```
 
+Sous Linux ou macOS:
+
+```bash
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
 ### Configuration
 
-```bash
-cp .env.example .env
-```
-
-Éditez `.env` avec vos valeurs :
+Créer un fichier `.env` à partir du modèle fourni, puis renseigner les variables principales:
 
 ```env
-# Supabase (SSL obligatoire)
 DATABASE_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT_REF].supabase.co:5432/postgres?sslmode=require
-
-# Cloudinary (pour suppression des images après traitement)
 CLOUDINARY_API_KEY=votre_api_key
 CLOUDINARY_API_SECRET=votre_api_secret
-
-# Securite
 SECRET_KEY=une_cle_secrete_aleatoire
 ```
 
-### Lancer le serveur
+`DATABASE_URL` pointe vers la base PostgreSQL. Les variables Cloudinary servent uniquement au nettoyage des images après traitement.
+
+### Lancement
 
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-L'API est disponible sur : http://localhost:8000  
-Documentation Swagger : http://localhost:8000/docs
-
----
+L’API est alors disponible sur `http://localhost:8000` et la documentation interactive sur `http://localhost:8000/docs`.
 
 ## Endpoints
 
 ### `GET /health`
-Vérifie que l'API et la base de données sont accessibles.
+
+Renvoie l’état de santé de l’API et le statut de connexion à la base.
+
+Réponse type:
 
 ```json
 {
   "statut": "ok",
   "environnement": "development",
+  "version": "1.0.0",
   "db_connectee": true
 }
 ```
 
----
-
 ### `POST /measure`
-Reçoit les 3 URLs Cloudinary, traite les images, stocke et retourne les mesures.
 
-**Body :**
+Traite trois images Cloudinary correspondant aux vues face, dos et profil.
+
+Exemple de body:
+
 ```json
 {
-  "fiche_id":   "550e8400-e29b-41d4-a716-446655440000",
-  "client_id":  "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "face_url":   "https://res.cloudinary.com/dvne7dd7h/image/upload/v1/koda_uploads/.../face.jpg",
-  "dos_url":    "https://res.cloudinary.com/dvne7dd7h/image/upload/v1/koda_uploads/.../dos.jpg",
-  "profil_url": "https://res.cloudinary.com/dvne7dd7h/image/upload/v1/koda_uploads/.../profil.jpg"
+  "fiche_id": "550e8400-e29b-41d4-a716-446655440000",
+  "client_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "face_url": "https://.../face.jpg",
+  "dos_url": "https://.../dos.jpg",
+  "profil_url": "https://.../profil.jpg"
 }
 ```
 
-**Réponse :**
+Réponse type:
+
 ```json
 {
-  "fiche_id":   "550e8400-...",
-  "client_id":  "a1b2c3d4-...",
-  "methode":    "mediapipe_3angles",
+  "fiche_id": "550e8400-...",
+  "client_id": "a1b2c3d4-...",
+  "methode": "mediapipe_3angles",
   "nb_mesures": 16,
-  "statut":     "ok",
-  "mesures": [
-    { "type_mesure_code": "EPAULES", "label": "Largeur epaules (E)",
-      "unite": "cm", "categorie": "largeur",
-      "valeur": 42.5, "source": "face+dos", "confiance": 0.94 },
-    ...
-  ]
+  "statut": "ok",
+  "mesures": []
 }
 ```
 
-**Cas d'erreur :**
-- `404` → `fiche_id` introuvable en DB
-- `422` → une vue (face/dos/profil) n'a pas pu être analysée
-- `503` → erreur base de données
+Erreurs possibles:
 
----
+- `404` si la fiche n’existe pas
+- `422` si la vue face ne peut pas être analysée
+- `503` si la base de données est indisponible
 
 ### `GET /measure/{fiche_id}`
-Retourne les mesures déjà stockées pour une fiche.
 
----
+Retourne les mesures déjà enregistrées pour une fiche donnée.
 
-## Pipeline MediaPipe (détail)
+### `POST /measure/cleanup`
 
-| Vue | Fonction | Landmarks extraits |
-|-----|----------|-------------------|
-| Face | `extraire_face()` | Hauteur, épaules, hanches, torse, bras, jambe, cuisse, mollet |
-| Dos | `extraire_dos()` | Validation épaules + hanches, torse (vue arrière) |
-| Profil | `extraire_profil()` | Profondeur buste + hanche, torse (vue latérale) |
-| Fusion | `fusionner()` | Agrège les 3 vues, calcule les circonférences par ellipse ou ratio ISO 8559 |
+Supprime manuellement une liste d’URLs Cloudinary passées dans la requête.
 
-Les 16 mesures produites correspondent aux codes `TypeMesure` de la base Supabase (seedée par Laravel).
+## Comment les mesures sont calculées
 
----
+Le calcul repose sur trois vues complémentaires.
 
-## Suppression automatique des images Cloudinary
+La vue de face fournit la base des longueurs visibles et permet la calibration à partir de la taille connue. La vue de dos consolide certaines largeurs, en particulier les épaules et les hanches. La vue de profil ajoute les profondeurs nécessaires au calcul de circonférences plus réalistes.
 
-Après un traitement réussi, le service supprime les 3 images de Cloudinary via l'API Admin.
+Quand la vue de profil est exploitable, le service estime les tours de poitrine, sous-poitrine, taille et hanches par approximation elliptique. Sinon, il utilise des ratios anthropométriques plus simples.
 
-**Configuration requise :**
-| Variable | Description |
-|---|---|
-| `CLOUDINARY_API_KEY` | API Key (Dashboard Cloudinary > Settings > Security) |
-| `CLOUDINARY_API_SECRET` | API Secret associé |
+Les principales familles de mesures sont:
 
-Si ces variables ne sont pas définies, la suppression est ignorée (warning dans les logs) — le scan fonctionne quand même.
+- hauteur totale
+- largeurs d’épaules, de carrure et de hanches
+- longueurs du torse, des bras, des jambes, des cuisses et des mollets
+- profondeurs du buste, de la taille et de la hanche
+- circonférences poitrine, sous-poitrine, taille, hanches, cou, genou, bas et poignet
 
----
+## Pipeline de traitement
 
-## Déploiement (Railway)
+| Étape | Fonction | Résultat |
+|---|---|---|
+| Téléchargement | `download_image_as_rgb()` | Image normalisée en RGB |
+| Détection | `detect_world_landmarks()` | Landmarks 3D MediaPipe |
+| Vue face | `extraire_face()` | Mesures visibles de face |
+| Vue dos | `extraire_dos()` | Mesures visibles de dos |
+| Vue profil | `extraire_profil()` | Profondeurs utiles |
+| Fusion | `fusionner()` | Mesures finales prêtes à stocker |
 
-L'API est déployée automatiquement sur Railway via GitHub.
+## Nettoyage Cloudinary
 
-1. Connecter le dépôt GitHub `couture-api` (branche `main`)
-2. Ajouter les variables d'environnement dans le dashboard Railway (voir `.env.example`)
-3. Le `Dockerfile` à la racine construit l'image avec le modèle MediaPipe pré-téléchargé (~130 Mo)
-4. Railway build et déploie automatiquement à chaque push sur `main`
+Après un traitement réussi, les trois images peuvent être supprimées de Cloudinary via l’API Admin. Si les variables d’API ne sont pas renseignées, le nettoyage est ignoré et le scan continue normalement.
 
-**Dépendances systèmes installées dans le Dockerfile :**
-- `libgl1-mesa-glx`, `libglib2.0-0` — OpenCV
-- `libgles2`, `libegl1` — MediaPipe (rendu OpenGL ES)
+## Déploiement
 
----
+Le projet est prévu pour un déploiement Docker. Le `Dockerfile` prépare l’environnement, installe les dépendances système nécessaires à OpenCV et MediaPipe, puis lance l’API FastAPI.
+
+Points à vérifier avant mise en production:
+
+- définir toutes les variables d’environnement
+- vérifier l’accès réseau à Cloudinary et à PostgreSQL
+- s’assurer que le modèle MediaPipe peut être téléchargé au premier lancement ou qu’il est déjà présent dans l’image
 
 ## Structure du projet
 
-```
+```text
 couture-api/
 ├── app/
-│   ├── main.py                       # Point d'entree FastAPI
+│   ├── main.py
 │   ├── core/
-│   │   ├── config.py                 # Variables d'environnement (Pydantic)
-│   │   └── database.py               # Connexion SQLAlchemy + session
 │   ├── models/
-│   │   ├── type_mesure.py            # Table type_mesures (read)
-│   │   ├── fiche_mesure.py           # Table fiche_mesures (read)
-│   │   └── mesure.py                 # Table mesures (write)
-│   ├── schemas/
-│   │   └── mesure.py                 # Schemas Pydantic (validation I/O)
 │   ├── routers/
-│   │   ├── health.py                 # GET /health
-│   │   └── mesures.py                # POST /measure, GET /measure/{id}
+│   ├── schemas/
 │   └── services/
-│       ├── download_service.py       # Telechargement + correction EXIF
-│       ├── pose_service.py           # MediaPipe — detection de pose
-│       ├── measurement_service.py    # Calcul + fusion des mesures (3 vues)
-│       └── cloudinary_cleanup.py     # Suppression images Cloudinary
 ├── Dockerfile
-├── .env.example
 ├── requirements.txt
 └── README.md
 ```
 
----
+## Points à retenir pour la soutenance
 
-## Base de données
-
-Tables partagées avec Laravel (mêmes schémas Supabase) :
-
-| Table | Rôle |
-|---|---|
-| `fiche_mesures` | Session de scan créée par Laravel |
-| `type_mesures` | Référentiel des 16 codes mesure (seedé) |
-| `mesures` | Résultats du scan (écrits par FastAPI, lus par Laravel) |
+- le service traite trois vues pour réduire les erreurs de mesure
+- la vue de profil améliore le calcul des circonférences
+- chaque mesure enregistrée garde sa source et son niveau de confiance
+- le nettoyage Cloudinary évite de laisser des fichiers inutiles après traitement
+- l’ensemble est conçu pour être consommé par Laravel et affiché dans Flutter

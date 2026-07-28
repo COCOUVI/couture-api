@@ -1,4 +1,4 @@
-# ── Logging ──────────────────────────────────────────────────────────
+"""Point d'entrée FastAPI de Couture API."""
 import logging
 from contextlib import asynccontextmanager
 
@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Vérifie la base au démarrage et journalise l'état de l'API."""
     ok = check_db_connection()
     if ok:
         logger.info("API prete")
@@ -22,7 +23,6 @@ async def lifespan(app: FastAPI):
     yield
 
 
-# ── Instance FastAPI ─────────────────────────────────────────────────
 app = FastAPI(
     title="Couture API — Mesures Corporelles",
     description=(
@@ -36,7 +36,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ── CORS — autorise toutes les origines (dev) ────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,12 +44,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Routage ──────────────────────────────────────────────────────────
 app.include_router(health.router)
 app.include_router(mesures.router)
 
 
-# ── Racine — redirection vers /docs ──────────────────────────────────
 @app.get("/", include_in_schema=False)
 def root():
+    """Retourne un message simple vers la documentation Swagger."""
     return {"message": "Couture API — voir /docs pour la documentation"}

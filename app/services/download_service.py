@@ -1,4 +1,4 @@
-#  Service de téléchargement et prétraitement des images
+"""Téléchargement et prétraitement des images avant analyse."""
 import io
 
 import httpx
@@ -7,11 +7,7 @@ from PIL import Image, ImageOps
 
 
 async def download_image_as_rgb(url: str) -> np.ndarray:
-    """
-    Telecharge une image depuis Cloudinary et retourne
-    un numpy array RVB avec l'orientation EXIF corrigee.
-    """
-    # Redimensionnement côté Cloudinary pour accélérer le download
+    """Télécharge une image Cloudinary et retourne un tableau RGB numpy."""
     optimized_url = _cloudinary_resize(url, width=800)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -22,12 +18,12 @@ async def download_image_as_rgb(url: str) -> np.ndarray:
     transposed = ImageOps.exif_transpose(img_pil)
     if transposed is not None:
         img_pil = transposed
-    img_pil = img_pil.convert("RGB")              # Supprime le canal alpha si présent
+    img_pil = img_pil.convert("RGB")
     return np.array(img_pil)
 
 
 def _cloudinary_resize(url: str, width: int) -> str:
-    """Insere un redimensionnement Cloudinary dans l'URL pour réduire le poids."""
+    """Injecte un redimensionnement Cloudinary dans l'URL quand c'est possible."""
     if "cloudinary.com" in url and "/upload/" in url:
         return url.replace("/upload/", f"/upload/w_{width},c_limit/")
     return url

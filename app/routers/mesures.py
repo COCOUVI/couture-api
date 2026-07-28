@@ -24,6 +24,7 @@ router = APIRouter(prefix="/measure", tags=["Mesures"])
 
 @router.post("", response_model=MesureResponse, status_code=status.HTTP_201_CREATED)
 async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_db)):
+    """Analyse les trois vues, fusionne les mesures et les enregistre en base."""
     urls = [payload.face_url, payload.dos_url, payload.profil_url]
 
     try:
@@ -119,6 +120,7 @@ async def analyser_et_stocker(payload: MesureRequest, db: Session = Depends(get_
 
 @router.post("/cleanup", status_code=status.HTTP_200_OK)
 async def cleanup_images(payload: CleanupRequest):
+    """Supprime manuellement les images Cloudinary passées dans la requête."""
     try:
         await cleanup_cloudinary_images(payload.urls)
         return {"status": "ok", "deleted": len(payload.urls)}
@@ -128,6 +130,7 @@ async def cleanup_images(payload: CleanupRequest):
 
 @router.get("/{fiche_id}", response_model=MesureResponse)
 def get_mesures(fiche_id: str, db: Session = Depends(get_db)):
+    """Récupère les mesures déjà stockées pour une fiche donnée."""
     try:
         fiche = db.query(FicheMesure).filter(
             FicheMesure.external_id == uuid.UUID(fiche_id)
