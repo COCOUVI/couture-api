@@ -61,25 +61,22 @@ MediaPipe donne des distances en unités arbitraires (world landmarks en mètres
 ### Détail du calcul de la hauteur brute
 
 ```python
-# Distance nez → cheville
-nose_to_ankle = abs(wlms[NOSE].y - ankle_y) * 100
+dist_nez_cheville = abs(wlms[NOSE].y - y_ch_moy) * 100
+dist_ep_cheville = abs(y_ep_moy - y_ch_moy) * 100
+largeur_bi_auric = w3d(wlms, LEFT_EAR, RIGHT_EAR)
 
-# Distance épaule → cheville
-shoulder_to_ankle = abs(shoulder_y - ankle_y) * 100
+# Portion du crâne au-dessus du nez (non couverte par le landmark NOSE)
+extension_cranienne = max(largeur_bi_auric * 0.45, largeur_epaules_brute * 0.14)
 
-# Correction pour la tête (au-dessus du nez)
-ear_width = w3d(wlms, LEFT_EAR, RIGHT_EAR)
-head_top_extra = max(ear_width * 0.45, epaules_raw * 0.14)
-
-# Correction pour les pieds (sous la cheville)
-foot_extra = max(epaules_raw * 0.07, 3.0)
+# Distance entre la cheville et le sol
+hauteur_semelle = max(largeur_epaules_brute * 0.07, 3.0)
 
 # Deux estimations indépendantes
-height_from_nose = nose_to_ankle + head_top_extra + foot_extra
-height_from_shoulders = shoulder_to_ankle / 0.82  # 0.82 = ratio épaule→cheville / stature
+h_nez = dist_nez_cheville + extension_cranienne + hauteur_semelle
+h_ep = dist_ep_cheville / 0.82  # 0.82 = ratio épaule→cheville / stature
 
 # Moyenne pondérée (65% nez, 35% épaules)
-raw_height = (height_from_nose * 0.65) + (height_from_shoulders * 0.35)
+hauteur_brute = (h_nez * 0.65) + (h_ep * 0.35)
 ```
 
 ### Pourquoi `known_height_cm` est obligatoire
@@ -512,6 +509,82 @@ Supprime les images de Cloudinary après traitement (ou en cas d'échec) pour ne
 | 1.20                               | Tour de genou                    | × longueur mollet                 | ISO 8559-1:2017          |
 | 0.65                               | Tour de poignet                  | × longueur avant-bras             | Pheasant (1986)          |
 | π × [3(a+b) − √((3a+b)(a+3b))] | Circonférence ellipse           | Précision < 0.04%                 | Ramanujan (1914)         |
+
+---
+
+# Noms de variables (justification)
+
+Chaque nom a été choisi pour être **auto-descriptif**, **conforme aux conventions anatomiques françaises**, et **sans anglicismes**.
+
+## Calibration (`_compute_scale`)
+
+| Variable | Traduction | Pourquoi ce nom |
+|---|---|---|
+| `largeur_epaules_brute` | largeur d'épaules brute | "Largeur" = mesure horizontale ; "épaules" = landmarks shoulders ; "brute" = en coordonnées normalisées, pas encore en cm |
+| `y_ep_moy` | y épaule moyen | "y" = coordonnée verticale dans l'image ; "ep" = abréviation d'épaules ; "moy" = moyenne des deux côtés |
+| `y_ch_moy` | y cheville moyen | "ch" = cheville ; même logique que y_ep_moy |
+| `dist_nez_cheville` | distance nez→cheville | "dist" = distance ; "nez" = parce qu'on utilise le landmark du nez (visible même de dos) ; "cheville" = landmark ankle |
+| `dist_ep_cheville` | distance épaules→cheville | Deuxième estimation verticale indépendante pour croiser avec le nez |
+| `largeur_bi_auric` | largeur bi-auriculaire | "Bi-auriculaire" = entre les deux oreilles (latin *auricula* = oreille), terme anatomique standard |
+| `extension_cranienne` | extension crânienne | Remplace l'anglicisme `head_top_extra` ; "extension" = ce qui dépasse du point NOSE ; "crânienne" = relatif au crâne (vs crane = grue) |
+| `hauteur_semelle` | hauteur de semelle | Remplace l'anglicisme `foot_extra` ; "semelle" = sous le pied, comme une semelle de chaussure ; immédiatement compris comme "distance cheville→sol" |
+| `h_nez` | hauteur estimée par le nez | Abréviation claire : "h" = hauteur, "nez" = méthode employée |
+| `h_ep` | hauteur estimée par les épaules | Idem, "ep" = épaules |
+| `hauteur_brute` | hauteur brute | "Brute" = calculée par somme de segments, avant application du scale |
+| `scale` | facteur d'échelle | Terme universel en imagerie (pixels/cm → cm) |
+
+## Vue de face (`extraire_face`)
+
+| Variable | Traduction | Pourquoi ce nom |
+|---|---|---|
+| `largeur_epaules` | largeur d'épaules | Même terme que dans `_compute_scale` mais en cm cette fois |
+| `carrure_devant` | carrure devant | "Carrure" = terme du tailoring pour la largeur entre emmanchures ; "devant" = vue de face (≠ dos) |
+| `largeur_buste_face` | largeur de buste (face) | "Buste" = torse au niveau de la poitrine ; "face" = précision de la vue |
+| `largeur_sous_seins_face` | largeur sous la poitrine | "Sous-seins" = sous la poitrine, terminologie lingerie ; pas "underbust" |
+| `largeur_ceinture_face` | largeur de ceinture | "Ceinture" = taille, au niveau du nombril |
+| `largeur_hanches` | largeur de hanches | "Hanches" = niveau trochanters (landmark HIP) |
+| `longueur_torse` | longueur du torse | "Longueur" = verticale ; "torse" = épaule→hanche ; pas "torso" |
+| `haut_sein` | hauteur de sein | "Hauteur" car mesurée de l'épaule vers le bas jusqu'au niveau du buste |
+| `longueur_sous_seins` | longueur sous-poitrine | Ne pas confondre avec `largeur_sous_seins_face` — ici c'est une longueur verticale |
+| `longueur_taille` | longueur taille | Position du nombril mesurée depuis l'épaule |
+| `longueur_chemise` | longueur chemise | Nom issue du métier (la chemise descend du nombril à la hanche) |
+| `longueur_manche` | longueur manche longue | "Manche" tout court = la manche longue complète épaule→poignet |
+| `longueur_manche_courte` | longueur manche courte | Précis : épaule→coude, nom utilisé dans les fiches de mesure |
+| `longueur_avant_bras` | longueur avant-bras | "Avant-bras" = coude→poignet, terme anatomique français standard |
+| `longueur_pantalon` | longueur pantalon | Hanche→cheville ; le nom du vêtement final plutôt que "jambe" |
+| `longueur_jupe` | longueur jupe | Hanche→cheville pour une jupe longue ; distingué de "pantalon" bien que la mesure soit identique (permet filtrage par sexe) |
+| `longueur_robe` | longueur robe | Épaule→cheville ; idem, nom orienté usage |
+| `longueur_cuisse` | longueur cuisse | Hanche→genou ; "cuisse" plutôt que "thigh" |
+| `longueur_mollet` | longueur mollet | Genou→cheville ; "mollet" plutôt que "calf" |
+| `hauteur_genou` | hauteur du genou | "Hauteur" = sol→genou (≠ longueur qui serait genou→cheville) ; +6 cm de correction talon |
+
+## Vue de profil (`extraire_profil`)
+
+| Variable | Traduction | Pourquoi ce nom |
+|---|---|---|
+| `profond_buste` | profondeur de buste | "Profond" = abréviation de profondeur (axe Z, pas Y) ; "buste" = niveau poitrine |
+| `profond_sous_seins` | profondeur sous-poitrine | Idem, niveau sous les seins |
+| `profond_ceinture` | profondeur de ceinture | Idem, niveau taille |
+| `profond_hanche` | profondeur de hanche | Idem, niveau hanches |
+| `torse_profil` | longueur torse (profil) | Même mesure que `longueur_torse` mais depuis la vue de profil ; utilisée dans la fusion |
+
+## Fusion des vues (`fusionner`)
+
+| Variable | Traduction | Pourquoi ce nom |
+|---|---|---|
+| `l_ep`, `l_bu`, `l_ss`, `l_ce`, `l_ha` | largeur épaule / buste / sous-seins / ceinture / hanches | Préfixe `l_` = largeur ; abréviations de 2-3 lettres pour éviter les lignes trop longues |
+| `p_bu`, `p_ss`, `p_ce`, `p_ha` | profondeur buste / sous-seins / ceinture / hanches | Préfixe `p_` = profondeur ; même abréviations |
+| `dl_bu`, `dp_bu` | demi-largeur / demi-profondeur de buste | `d` = demi (half) ; utilisé pour les demi-axes de l'ellipse |
+| `tour_poitrine` | tour de poitrine | "Tour" = circonférence (en français, un tour est une mesure de circonférence) ; "poitrine" plutôt que "chest" |
+| `tour_sous_seins` | tour sous-poitrine | Idem ; "sous-seins" = sous la poitrine, standard lingerie |
+| `tour_ceinture` | tour de ceinture | "Ceinture" = taille, standard tailoring |
+| `tour_hanches` | tour de hanches | "Fesses" dans la sortie = `TOUR_FESSES` car = le tour au niveau le plus large des fesses ; ici "hanches" dans le code car vient de PROFONDEUR_HANCHE |
+| `source_tours` | source des tours | Chaîne décrivant la méthode de calcul ("ellipse_ramanujan(face+profil)" ou "ratio_iso8559(face_seule)") |
+| `c_poitrine`, `c_sous_seins`, `c_ceinture`, `c_hanches` | confiance des tours | `c_` = confiance ; valeur entre 0 et 1 |
+| `l_mollet` | longueur mollet | Idem `longueur_mollet` ; abrégé ici car réutilisé pour plusieurs tours |
+| `l_av_bras` | longueur avant-bras | Abréviation de `longueur_avant_bras` |
+| `largeur_bi_auric` | largeur bi-auriculaire | Même variable que dans `_compute_scale` ; réutilisée ici pour le `TOUR_COU` |
+| `profil_ok` | profil OK | Booléen : vrai si la vue de profil avait une profondeur exploitable ; décide entre ellipse et ratio simple |
 
 ---
 

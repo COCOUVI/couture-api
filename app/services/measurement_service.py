@@ -106,9 +106,9 @@ def _compute_scale(wlms: list, taille_connue_cm: float) -> float:
     dist_nez_cheville = abs(wlms[NOSE].y - y_ch_moy) * 100
     dist_ep_cheville = abs(y_ep_moy - y_ch_moy) * 100
     largeur_bi_auric = w3d(wlms, LEFT_EAR, RIGHT_EAR)
-    bonus_crane = max(largeur_bi_auric * 0.45, largeur_epaules_brute * 0.14)
-    bonus_pied = max(largeur_epaules_brute * 0.07, 3.0)
-    h_nez = dist_nez_cheville + bonus_crane + bonus_pied
+    extension_cranienne = max(largeur_bi_auric * 0.45, largeur_epaules_brute * 0.14)
+    hauteur_semelle = max(largeur_epaules_brute * 0.07, 3.0)
+    h_nez = dist_nez_cheville + extension_cranienne + hauteur_semelle
     h_ep = dist_ep_cheville / 0.82
     hauteur_brute = (h_nez * 0.65) + (h_ep * 0.35)
     scale = taille_connue_cm / max(hauteur_brute, 1.0)
